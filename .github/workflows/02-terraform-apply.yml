@@ -23,10 +23,6 @@ jobs:
       contents: read
       actions: write
 
-    outputs:
-      bastion_ip: ${{ steps.extract.outputs.bastion_ip }}
-      lb_dns: ${{ steps.extract.outputs.lb_dns }}
-
     steps:
       - name: 📥 Checkout Code
         uses: actions/checkout@v4
@@ -62,11 +58,26 @@ jobs:
           echo "bastion_ip=$(terraform output -raw bastion_public_ip)" >> $GITHUB_OUTPUT
           echo "lb_dns=$(terraform output -raw master_load_balancer_dns)" >> $GITHUB_OUTPUT
 
-      - name: 🚀 Trigger Ansible Provision
+      - name: 📦 Save Terraform Outputs
+        working-directory: terraform-k8s-infrastructure
+        run: |
+          mkdir -p /tmp/terraform-outputs
+          terraform output -raw bastion_public_ip > /tmp/terraform-outputs/bastion_ip.txt
+          terraform output -raw master_load_balancer_dns > /tmp/terraform-outputs/lb_dns.txt
+          terraform output -json master_private_ips > /tmp/terraform-outputs/master_ips.json
+          terraform output -json worker_private_ips > /tmp/terraform-outputs/worker_ips.json
+          terraform output -raw ssh_private_key > /tmp/terraform-outputs/petclinic-test-key.pem
+          chmod 400 /tmp/terraform-outputs/petclinic-test-key.pem
+
+      - name: 📦 Upload Terraform Outputs
+        uses: actions/upload-artifact@v4
+        with:
+          name: terraform-outputs
+          path: /tmp/terraform-outputs/
+          retention-days: 7
+
+      - name: 🚀 Trigger Ansible Workflow
         uses: peter-evans/workflow-dispatch@v2
         with:
           workflow: "03-ansible-provision.yml"
           ref: "main"
-          inputs:
-            bastion_ip: ${{ steps.extract.outputs.bastion_ip }}
-            lb_dns: ${{ steps.extract.outputs.lb_dns }}
