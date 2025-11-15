@@ -25,6 +25,7 @@ jobs:
     name: Setup Kubernetes Cluster
     runs-on: ubuntu-latest
     
+    # Only run if triggered manually OR if Apply succeeded
     if: |
       github.event_name == 'workflow_dispatch' || 
       (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success')
@@ -72,10 +73,68 @@ jobs:
           aws-region: ${{ env.AWS_REGION }}
       
       - name: 📥 Download Terraform Outputs
+        id: download_artifacts
         uses: actions/download-artifact@v4
         with:
           name: terraform-outputs
           path: /tmp/terraform-outputs
+        continue-on-error: true
+      
+      - name: ❌ Check Artifacts
+        if: steps.download_artifacts.outcome == 'failure'
+        run: |
+          echo "════════════════════════════════════════"
+          echo "❌ ERROR: Terraform outputs not found!"
+          echo "════════════════════════════════════════"
+          echo ""
+          echo "This means one of the following:"
+          echo "1. 02-terraform-apply.yml didn't run yet"
+          echo "2. 02-terraform-apply.yml failed"
+          echo "3. Artifacts expired (7 days retention)"
+          echo ""
+          echo "📋 How to fix:"
+          echo "1. Go to Actions tab"
+          echo "2. Run '02 - Terraform Apply' workflow"
+          echo "3. Wait for it to complete (~10 min)"
+          echo "4. This workflow will auto-trigger"
+          echo ""
+          echo "Or manually trigger after Apply succeeds."
+          echo ""
+          exit 1
+      
+      - name: ✅ Verify Artifacts
+        run: |
+          echo "════════════════════════════════════════"
+          echo "✅ Verifying downloaded artifacts..."
+          echo "════════════════════════════════════════"
+          
+          if [ ! -d "/tmp/terraform-outputs" ]; then
+            echo "❌ Artifacts directory not found!"
+            exit 1
+          fi
+          
+          echo "📦 Artifacts found:"
+          ls -lh /tmp/terraform-outputs/
+          
+          # Check required files
+          REQUIRED_FILES=(
+            "bastion_ip.txt"
+            "lb_dns.txt"
+            "master_ips.json"
+            "worker_ips.json"
+            "petclinic-test-key.pem"
+          )
+          
+          for file in "${REQUIRED_FILES[@]}"; do
+            if [ ! -f "/tmp/terraform-outputs/$file" ]; then
+              echo "❌ Missing required file: $file"
+              exit 1
+            fi
+            echo "  ✅ $file"
+          done
+          
+          echo ""
+          echo "✅ All artifacts verified!"
       
       - name: 🔑 Setup SSH Key
         run: |
@@ -202,22 +261,33 @@ EOF
         working-directory: ansible-k8s-setup
         run: |
           echo "════════════════════════════════════════"
-          echo "📋 Inventory:"
+          echo "📋 Generated Inventory:"
           echo "════════════════════════════════════════"
           cat inventory/hosts.ini
       
       - name: ⏳ Wait for Nodes
         run: |
-          echo "⏳ Waiting 2 minutes for user-data..."
+          echo "════════════════════════════════════════"
+          echo "⏳ Waiting for user-data scripts..."
+          echo "════════════════════════════════════════"
+          echo "This takes ~2 minutes for EC2 to:"
+          echo "  • Run user-data scripts"
+          echo "  • Install Kubernetes components"
+          echo "  • Configure networking"
+          echo ""
           sleep 120
+          echo "✅ Wait completed!"
       
       - name: 🔌 Test Connectivity
         working-directory: ansible-k8s-setup
         run: |
-          echo "🔌 Testing connectivity..."
-          ansible all -i inventory/hosts.ini -m ping || echo "⚠️ Some nodes not ready"
+          echo "════════════════════════════════════════"
+          echo "🔌 Testing SSH connectivity..."
+          echo "════════════════════════════════════════"
+          
+          ansible all -i inventory/hosts.ini -m ping || echo "⚠️ Some nodes not ready yet"
       
-      - name: "✅ Step 1: Verify Nodes"
+      - name: "✅ Step 1/8: Verify Nodes"
         if: github.event.inputs.skip_verification != 'true'
         working-directory: ansible-k8s-setup
         run: |
@@ -226,7 +296,7 @@ EOF
           echo "════════════════════════════════════════"
           ansible-playbook playbooks/01-verify-nodes.yml -i inventory/hosts.ini
       
-      - name: "🎯 Step 2: Init First Master"
+      - name: "🎯 Step 2/8: Init First Master"
         working-directory: ansible-k8s-setup
         run: |
           echo "════════════════════════════════════════"
@@ -234,7 +304,7 @@ EOF
           echo "════════════════════════════════════════"
           ansible-playbook playbooks/02-init-first-master.yml -i inventory/hosts.ini
       
-      - name: "🔗 Step 3: Join Masters"
+      - name: "🔗 Step 3/8: Join Masters"
         working-directory: ansible-k8s-setup
         run: |
           echo "════════════════════════════════════════"
@@ -242,7 +312,7 @@ EOF
           echo "════════════════════════════════════════"
           ansible-playbook playbooks/03-join-masters.yml -i inventory/hosts.ini
       
-      - name: "👷 Step 4: Join Workers"
+      - name: "👷 Step 4/8: Join Workers"
         working-directory: ansible-k8s-setup
         run: |
           echo "════════════════════════════════════════"
@@ -250,7 +320,7 @@ EOF
           echo "════════════════════════════════════════"
           ansible-playbook playbooks/04-join-workers.yml -i inventory/hosts.ini
       
-      - name: "🌐 Step 5: Install CNI"
+      - name: "🌐 Step 5/8: Install CNI"
         working-directory: ansible-k8s-setup
         run: |
           echo "════════════════════════════════════════"
@@ -258,7 +328,7 @@ EOF
           echo "════════════════════════════════════════"
           ansible-playbook playbooks/05-install-cni.yml -i inventory/hosts.ini
       
-      - name: "📦 Step 6: Create Namespaces"
+      - name: "📦 Step 6/8: Create Namespaces"
         working-directory: ansible-k8s-setup
         run: |
           echo "════════════════════════════════════════"
@@ -266,7 +336,7 @@ EOF
           echo "════════════════════════════════════════"
           ansible-playbook playbooks/06-create-namespaces.yml -i inventory/hosts.ini
       
-      - name: "🖥️ Step 7: Setup Kubectl"
+      - name: "🖥️ Step 7/8: Setup Kubectl"
         working-directory: ansible-k8s-setup
         run: |
           echo "════════════════════════════════════════"
@@ -274,7 +344,7 @@ EOF
           echo "════════════════════════════════════════"
           ansible-playbook playbooks/07-setup-kubectl-bastion.yml -i inventory/hosts.ini
       
-      - name: "🔀 Step 8: Install Ingress"
+      - name: "🔀 Step 8/8: Install Ingress"
         working-directory: ansible-k8s-setup
         run: |
           echo "════════════════════════════════════════"
@@ -321,10 +391,15 @@ EOF
           echo "• Masters:  3"
           echo "• Workers:  3"
           echo ""
-          echo "🔑 Access:"
+          echo "🔑 SSH Access:"
           echo "ssh -i petclinic-test-key.pem ubuntu@$BASTION_IP"
           echo ""
           echo "📦 Artifacts:"
           echo "• terraform-outputs"
           echo "• kubeconfig"
+          echo ""
+          echo "🎯 Next Steps:"
+          echo "1. Download kubeconfig artifact"
+          echo "2. export KUBECONFIG=./kubeconfig"
+          echo "3. kubectl get nodes"
           echo ""
