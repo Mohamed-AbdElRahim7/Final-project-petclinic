@@ -1,0 +1,205 @@
+name: 04 - Terraform Destroy
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm_destroy:
+        description: 'Type "destroy" to confirm deletion of all resources'
+        required: true
+        type: string
+      
+      delete_s3_bucket:
+        description: 'Also delete S3 bucket'
+        required: false
+        type: boolean
+        default: false
+
+env:
+  TF_VERSION: '1.6.0'
+  AWS_REGION: 'us-east-1'
+
+jobs:
+  terraform-destroy:
+    name: Destroy AWS Infrastructure
+    runs-on: ubuntu-latest
+    
+    permissions:
+      contents: read
+      id-token: write
+    
+    steps:
+      - name: 📥 Checkout Code
+        uses: actions/checkout@v4
+      
+      - name: ⚠️ Validate Destroy Confirmation
+        run: |
+          if [ "${{ github.event.inputs.confirm_destroy }}" != "destroy" ]; then
+            echo "════════════════════════════════════════"
+            echo "❌ ERROR: Destroy confirmation failed!"
+            echo "════════════════════════════════════════"
+            echo ""
+            echo "You must type 'destroy' exactly to confirm."
+            echo "Current input: '${{ github.event.inputs.confirm_destroy }}'"
+            echo ""
+            echo "This is a safety measure to prevent accidental deletion."
+            echo ""
+            exit 1
+          fi
+          
+          echo "════════════════════════════════════════"
+          echo "✅ Destroy confirmed"
+          echo "════════════════════════════════════════"
+      
+      - name: 🔐 Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: ${{ env.AWS_REGION }}
+      
+      - name: 🧪 Test AWS Connection
+        run: |
+          echo "════════════════════════════════════════"
+          echo "🧪 Testing AWS Connection..."
+          echo "════════════════════════════════════════"
+          aws sts get-caller-identity
+          echo "✅ AWS connection successful!"
+      
+      - name: 🔧 Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+      
+      - name: ⚙️ Terraform Init
+        working-directory: terraform-k8s-infrastructure
+        run: |
+          echo "════════════════════════════════════════"
+          echo "⚙️ Initializing Terraform..."
+          echo "════════════════════════════════════════"
+          terraform init
+          echo "✅ Init completed!"
+      
+      - name: 📋 Show Resources to be Destroyed
+        working-directory: terraform-k8s-infrastructure
+        run: |
+          echo "════════════════════════════════════════"
+          echo "📋 Resources to be destroyed:"
+          echo "════════════════════════════════════════"
+          terraform state list || echo "No state found"
+          
+          echo ""
+          echo "Total resources:"
+          terraform state list | wc -l
+      
+      - name: ⏸️ Final Confirmation
+        run: |
+          echo "════════════════════════════════════════"
+          echo "⚠️  FINAL WARNING"
+          echo "════════════════════════════════════════"
+          echo ""
+          echo "This will PERMANENTLY DELETE:"
+          echo "  • 1 VPC with subnets"
+          echo "  • 1 Bastion host"
+          echo "  • 3 Master nodes"
+          echo "  • 3 Worker nodes"
+          echo "  • 3 NAT Gateways"
+          echo "  • 3 Elastic IPs"
+          echo "  • 1 Network Load Balancer"
+          echo "  • All Security Groups"
+          echo "  • All EBS volumes"
+          echo "  • SSH key pair"
+          echo ""
+          echo "Waiting 10 seconds before proceeding..."
+          sleep 10
+          echo "✅ Proceeding with destroy..."
+      
+      - name: 🗑️ Terraform Destroy
+        working-directory: terraform-k8s-infrastructure
+        run: |
+          echo "════════════════════════════════════════"
+          echo "🗑️ Starting Terraform Destroy..."
+          echo "════════════════════════════════════════"
+          
+          terraform destroy -auto-approve -input=false
+          
+          echo ""
+          echo "✅ Terraform Destroy Completed!"
+      
+      - name: 🗑️ Delete S3 Bucket (Optional)
+        if: github.event.inputs.delete_s3_bucket == 'true'
+        run: |
+          echo "════════════════════════════════════════"
+          echo "🗑️ Deleting S3 Bucket..."
+          echo "════════════════════════════════════════"
+          
+          BUCKET_NAME="petclinic-atos"
+          
+          # Empty bucket first
+          echo "Emptying bucket..."
+          aws s3 rm s3://${BUCKET_NAME} --recursive || echo "Bucket already empty"
+          
+          # Delete bucket
+          echo "Deleting bucket..."
+          aws s3api delete-bucket --bucket ${BUCKET_NAME} --region ${{ env.AWS_REGION }} || echo "Bucket already deleted"
+          
+          echo "✅ S3 Bucket deleted!"
+      
+      - name: 🧹 Clean Local State
+        working-directory: terraform-k8s-infrastructure
+        run: |
+          echo "════════════════════════════════════════"
+          echo "🧹 Cleaning local state files..."
+          echo "════════════════════════════════════════"
+          
+          rm -f terraform.tfstate
+          rm -f terraform.tfstate.backup
+          rm -f .terraform.lock.hcl
+          rm -rf .terraform/
+          
+          echo "✅ Local state cleaned!"
+      
+      - name: 🧹 Delete Old Artifacts (Optional)
+        continue-on-error: true
+        run: |
+          echo "════════════════════════════════════════"
+          echo "🧹 Note: Old artifacts will expire automatically"
+          echo "════════════════════════════════════════"
+          echo ""
+          echo "Artifacts are kept for 7 days by default"
+          echo "You can manually delete them from:"
+          echo "  Actions → Select workflow run → Delete"
+      
+      - name: ✅ Destroy Complete
+        run: |
+          echo ""
+          echo "╔════════════════════════════════════════╗"
+          echo "║  ✅ Destroy Completed Successfully!   ║"
+          echo "╚════════════════════════════════════════╝"
+          echo ""
+          echo "📊 Destroyed Resources:"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "  ✅ All EC2 instances deleted"
+          echo "  ✅ VPC and networking deleted"
+          echo "  ✅ Load balancers deleted"
+          echo "  ✅ Security groups deleted"
+          echo "  ✅ EBS volumes deleted"
+          echo "  ✅ SSH key pair deleted"
+          if [ "${{ github.event.inputs.delete_s3_bucket }}" == "true" ]; then
+            echo "  ✅ S3 bucket deleted"
+          fi
+          echo ""
+          echo "💰 Cost Impact:"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "  • AWS charges will stop immediately"
+          echo "  • No more EC2 hourly charges"
+          echo "  • No more NAT Gateway charges"
+          echo "  • No more EBS storage charges"
+          echo ""
+          echo "🔄 To redeploy:"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "  1. Run '02 - Terraform Apply' workflow"
+          echo "  2. Wait ~10 minutes"
+          echo "  3. Cluster will be recreated"
+          echo ""
