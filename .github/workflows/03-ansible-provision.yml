@@ -48,7 +48,11 @@ jobs:
           
           pip install --upgrade pip setuptools wheel
           pip install -r requirements.txt
-          ansible-galaxy collection install -r requirements.yml --force
+          
+          # Install collections if requirements.yml exists
+          if [ -f requirements.yml ] && [ -s requirements.yml ]; then
+            ansible-galaxy collection install -r requirements.yml --force || echo "No collections to install"
+          fi
           
           echo ""
           echo "Ansible installed:"
