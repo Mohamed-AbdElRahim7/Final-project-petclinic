@@ -1,8 +1,7 @@
-ansible-core>=2.15.0,<2.17.0
-boto3>=1.28.0
-botocore>=1.31.0
-kubernetes>=28.0.0
+ansible>=2.15.0,<2.18.0
+ansible-core>=2.15.0,<2.18.0
+jinja2>=3.1.0
 PyYAML>=6.0
-Jinja2>=3.1.0
-netaddr>=0.10.0
-jsonschema>=4.17.0
+kubernetes>=28.1.0
+openshift>=0.13.0
+jsonpatch>=1.32
