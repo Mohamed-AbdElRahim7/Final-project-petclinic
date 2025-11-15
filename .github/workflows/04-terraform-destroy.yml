@@ -14,8 +14,8 @@ on:
         type: boolean
         default: false
       
-      force_cleanup:
-        description: 'Force cleanup of stuck resources'
+      force_manual_cleanup:
+        description: 'Force manual AWS cleanup if Terraform fails'
         required: false
         type: boolean
         default: false
@@ -47,6 +47,8 @@ jobs:
             echo "You must type 'destroy' exactly to confirm."
             echo "Current input: '${{ github.event.inputs.confirm_destroy }}'"
             echo ""
+            echo "This is a safety measure to prevent accidental deletion."
+            echo ""
             exit 1
           fi
           
@@ -76,32 +78,6 @@ jobs:
           terraform_version: ${{ env.TF_VERSION }}
           terraform_wrapper: false
       
-      - name: 🛡️ Disable Termination Protection
-        if: github.event.inputs.force_cleanup == 'true'
-        continue-on-error: true
-        run: |
-          echo "════════════════════════════════════════"
-          echo "🛡️ Disabling Termination Protection..."
-          echo "════════════════════════════════════════"
-          
-          INSTANCE_IDS=$(aws ec2 describe-instances \
-            --filters "Name=tag:Project,Values=petclinic-k8s" \
-                      "Name=instance-state-name,Values=running,stopped" \
-            --query 'Reservations[].Instances[].InstanceId' \
-            --output text)
-          
-          if [ -n "$INSTANCE_IDS" ]; then
-            for INSTANCE_ID in $INSTANCE_IDS; do
-              echo "Disabling protection for: $INSTANCE_ID"
-              aws ec2 modify-instance-attribute \
-                --instance-id $INSTANCE_ID \
-                --no-disable-api-termination || true
-            done
-            echo "✅ Termination protection disabled!"
-          else
-            echo "ℹ️ No instances found"
-          fi
-      
       - name: ⚙️ Terraform Init
         working-directory: terraform-k8s-infrastructure
         run: |
@@ -111,80 +87,390 @@ jobs:
           terraform init
           echo "✅ Init completed!"
       
-      - name: 📋 Show Resources to be Destroyed
+      - name: 🔍 Check State File
+        id: check_state
         working-directory: terraform-k8s-infrastructure
+        continue-on-error: true
         run: |
           echo "════════════════════════════════════════"
-          echo "📋 Resources to be destroyed:"
+          echo "🔍 Checking Terraform State..."
           echo "════════════════════════════════════════"
-          terraform state list || echo "No state found"
+          
+          # Try to pull state from S3 backend
+          terraform state pull > /tmp/current_state.json 2>&1 || true
+          
+          if [ -s /tmp/current_state.json ] && grep -q "resources" /tmp/current_state.json; then
+            echo "✅ State file found in S3 backend!"
+            RESOURCE_COUNT=$(terraform state list 2>/dev/null | wc -l)
+            echo "state_exists=true" >> $GITHUB_OUTPUT
+            echo "resource_count=$RESOURCE_COUNT" >> $GITHUB_OUTPUT
+            echo ""
+            echo "📊 Resources in state: $RESOURCE_COUNT"
+            echo ""
+            echo "Resources to destroy:"
+            terraform state list || true
+          else
+            echo "⚠️ No state file found!"
+            echo "state_exists=false" >> $GITHUB_OUTPUT
+            echo ""
+            echo "This could mean:"
+            echo "1. Infrastructure was already destroyed"
+            echo "2. Terraform was never applied"
+            echo "3. S3 backend is not configured correctly"
+          fi
+      
+      - name: 📋 Show Current Resources in AWS
+        continue-on-error: true
+        run: |
+          echo "════════════════════════════════════════"
+          echo "📋 Checking AWS Resources..."
+          echo "════════════════════════════════════════"
           
           echo ""
-          echo "Total resources:"
-          terraform state list 2>/dev/null | wc -l || echo "0"
-      
-      - name: ⏸️ Final Confirmation
-        run: |
-          echo "════════════════════════════════════════"
-          echo "⚠️  FINAL WARNING"
-          echo "════════════════════════════════════════"
+          echo "🖥️ EC2 Instances:"
+          aws ec2 describe-instances \
+            --filters "Name=tag:Project,Values=petclinic-k8s" \
+                      "Name=instance-state-name,Values=running,stopped,pending" \
+            --query 'Reservations[].Instances[].{ID:InstanceId,Name:Tags[?Key==`Name`]|[0].Value,State:State.Name,IP:PrivateIpAddress}' \
+            --output table || echo "No instances found"
+          
           echo ""
-          echo "This will PERMANENTLY DELETE all infrastructure"
+          echo "🌐 VPCs:"
+          aws ec2 describe-vpcs \
+            --filters "Name=tag:Project,Values=petclinic-k8s" \
+            --query 'Vpcs[].{ID:VpcId,CIDR:CidrBlock,Name:Tags[?Key==`Name`]|[0].Value}' \
+            --output table || echo "No VPCs found"
+          
           echo ""
-          echo "Waiting 10 seconds before proceeding..."
-          sleep 10
-          echo "✅ Proceeding with destroy..."
+          echo "⚖️ Load Balancers:"
+          aws elbv2 describe-load-balancers \
+            --query 'LoadBalancers[?contains(LoadBalancerName, `k8s`)].{Name:LoadBalancerName,DNS:DNSName,State:State.Code}' \
+            --output table || echo "No load balancers found"
+          
+          echo ""
+          echo "🔑 Key Pairs:"
+          aws ec2 describe-key-pairs \
+            --filters "Name=key-name,Values=petclinic-test-key" \
+            --query 'KeyPairs[].{Name:KeyName,ID:KeyPairId}' \
+            --output table || echo "No key pairs found"
       
       - name: 🗑️ Terraform Destroy
+        if: steps.check_state.outputs.state_exists == 'true'
         working-directory: terraform-k8s-infrastructure
+        continue-on-error: true
         run: |
           echo "════════════════════════════════════════"
           echo "🗑️ Starting Terraform Destroy..."
           echo "════════════════════════════════════════"
+          echo ""
+          echo "📊 Resources to destroy: ${{ steps.check_state.outputs.resource_count }}"
+          echo ""
           
+          # Try destroy with retries
           MAX_RETRIES=3
           RETRY_COUNT=0
+          SUCCESS=false
           
           while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
             echo "Attempt $((RETRY_COUNT + 1)) of $MAX_RETRIES..."
+            echo ""
             
             if terraform destroy -auto-approve -input=false; then
-              echo "✅ Destroy successful!"
-              exit 0
+              echo ""
+              echo "✅ Terraform Destroy successful!"
+              SUCCESS=true
+              break
             else
               RETRY_COUNT=$((RETRY_COUNT + 1))
               if [ $RETRY_COUNT -lt $MAX_RETRIES ]; then
+                echo ""
                 echo "⚠️ Destroy failed, waiting 30 seconds before retry..."
                 sleep 30
-              else
-                echo "❌ Destroy failed after $MAX_RETRIES attempts"
-                echo "Try running with 'force_cleanup' enabled"
-                exit 1
               fi
             fi
           done
+          
+          if [ "$SUCCESS" = false ]; then
+            echo ""
+            echo "❌ Terraform Destroy failed after $MAX_RETRIES attempts"
+            echo "Will try manual cleanup next..."
+          fi
       
-      - name: 🔌 Cleanup Stuck Resources
-        if: failure() && github.event.inputs.force_cleanup == 'true'
+      - name: 🗑️ Manual AWS Cleanup
+        if: |
+          (steps.check_state.outputs.state_exists == 'false' && github.event.inputs.force_manual_cleanup == 'true') ||
+          (failure() && github.event.inputs.force_manual_cleanup == 'true')
         continue-on-error: true
         run: |
           echo "════════════════════════════════════════"
-          echo "🔌 Force cleaning stuck resources..."
+          echo "🗑️ Manual AWS Resource Cleanup..."
           echo "════════════════════════════════════════"
+          echo ""
+          echo "⚠️ Terraform state not available or destroy failed"
+          echo "Attempting manual cleanup of tagged resources..."
+          echo ""
           
-          # Delete available ENIs
+          # Function to wait for resource deletion
+          wait_for_deletion() {
+            local check_command="$1"
+            local resource_name="$2"
+            local max_wait=60
+            local waited=0
+            
+            echo "Waiting for $resource_name deletion..."
+            while [ $waited -lt $max_wait ]; do
+              if ! eval "$check_command" &>/dev/null; then
+                echo "✅ $resource_name deleted"
+                return 0
+              fi
+              sleep 5
+              waited=$((waited + 5))
+            done
+            echo "⚠️ Timeout waiting for $resource_name deletion"
+            return 1
+          }
+          
+          # 1. Terminate EC2 Instances
+          echo "1️⃣ Terminating EC2 Instances..."
+          INSTANCE_IDS=$(aws ec2 describe-instances \
+            --filters "Name=tag:Project,Values=petclinic-k8s" \
+                      "Name=instance-state-name,Values=running,stopped,pending" \
+            --query 'Reservations[].Instances[].InstanceId' \
+            --output text)
+          
+          if [ -n "$INSTANCE_IDS" ]; then
+            # Disable termination protection first
+            for INSTANCE_ID in $INSTANCE_IDS; do
+              echo "  Disabling protection: $INSTANCE_ID"
+              aws ec2 modify-instance-attribute \
+                --instance-id $INSTANCE_ID \
+                --no-disable-api-termination 2>/dev/null || true
+            done
+            
+            # Terminate instances
+            echo "  Terminating: $INSTANCE_IDS"
+            aws ec2 terminate-instances --instance-ids $INSTANCE_IDS || true
+            
+            # Wait for termination
+            echo "  Waiting for instances to terminate..."
+            aws ec2 wait instance-terminated --instance-ids $INSTANCE_IDS 2>/dev/null || sleep 30
+            echo "  ✅ Instances terminated"
+          else
+            echo "  ℹ️ No instances found"
+          fi
+          
+          echo ""
+          
+          # 2. Delete Load Balancers
+          echo "2️⃣ Deleting Load Balancers..."
+          LB_ARNS=$(aws elbv2 describe-load-balancers \
+            --query 'LoadBalancers[?contains(LoadBalancerName, `k8s`)].LoadBalancerArn' \
+            --output text)
+          
+          if [ -n "$LB_ARNS" ]; then
+            for LB_ARN in $LB_ARNS; do
+              echo "  Deleting: $LB_ARN"
+              aws elbv2 delete-load-balancer --load-balancer-arn "$LB_ARN" || true
+            done
+            sleep 10
+            echo "  ✅ Load balancers deleted"
+          else
+            echo "  ℹ️ No load balancers found"
+          fi
+          
+          echo ""
+          
+          # 3. Delete Target Groups
+          echo "3️⃣ Deleting Target Groups..."
+          TG_ARNS=$(aws elbv2 describe-target-groups \
+            --query 'TargetGroups[?contains(TargetGroupName, `k8s`)].TargetGroupArn' \
+            --output text)
+          
+          if [ -n "$TG_ARNS" ]; then
+            for TG_ARN in $TG_ARNS; do
+              echo "  Deleting: $TG_ARN"
+              aws elbv2 delete-target-group --target-group-arn "$TG_ARN" 2>/dev/null || true
+            done
+            echo "  ✅ Target groups deleted"
+          else
+            echo "  ℹ️ No target groups found"
+          fi
+          
+          echo ""
+          
+          # 4. Delete NAT Gateways
+          echo "4️⃣ Deleting NAT Gateways..."
+          NAT_IDS=$(aws ec2 describe-nat-gateways \
+            --filter "Name=tag:Project,Values=petclinic-k8s" \
+                     "Name=state,Values=available,pending" \
+            --query 'NatGateways[].NatGatewayId' \
+            --output text)
+          
+          if [ -n "$NAT_IDS" ]; then
+            for NAT_ID in $NAT_IDS; do
+              echo "  Deleting: $NAT_ID"
+              aws ec2 delete-nat-gateway --nat-gateway-id "$NAT_ID" || true
+            done
+            echo "  Waiting for NAT gateways to delete (60s)..."
+            sleep 60
+            echo "  ✅ NAT gateways deleted"
+          else
+            echo "  ℹ️ No NAT gateways found"
+          fi
+          
+          echo ""
+          
+          # 5. Release Elastic IPs
+          echo "5️⃣ Releasing Elastic IPs..."
+          EIP_ALLOC_IDS=$(aws ec2 describe-addresses \
+            --filters "Name=tag:Project,Values=petclinic-k8s" \
+            --query 'Addresses[].AllocationId' \
+            --output text)
+          
+          if [ -n "$EIP_ALLOC_IDS" ]; then
+            for ALLOC_ID in $EIP_ALLOC_IDS; do
+              echo "  Releasing: $ALLOC_ID"
+              aws ec2 release-address --allocation-id "$ALLOC_ID" 2>/dev/null || true
+            done
+            echo "  ✅ Elastic IPs released"
+          else
+            echo "  ℹ️ No Elastic IPs found"
+          fi
+          
+          echo ""
+          
+          # 6. Delete Network Interfaces
+          echo "6️⃣ Deleting Network Interfaces..."
+          sleep 10  # Wait for resources to detach
           ENI_IDS=$(aws ec2 describe-network-interfaces \
             --filters "Name=tag:Project,Values=petclinic-k8s" \
             --query 'NetworkInterfaces[?Status==`available`].NetworkInterfaceId' \
             --output text)
           
-          for ENI_ID in $ENI_IDS; do
-            echo "Deleting ENI: $ENI_ID"
-            aws ec2 delete-network-interface \
-              --network-interface-id $ENI_ID || true
+          if [ -n "$ENI_IDS" ]; then
+            for ENI_ID in $ENI_IDS; do
+              echo "  Deleting: $ENI_ID"
+              aws ec2 delete-network-interface --network-interface-id "$ENI_ID" 2>/dev/null || true
+            done
+            echo "  ✅ Network interfaces deleted"
+          else
+            echo "  ℹ️ No available network interfaces found"
+          fi
+          
+          echo ""
+          
+          # 7. Delete Security Groups (except default)
+          echo "7️⃣ Deleting Security Groups..."
+          sleep 5
+          SG_IDS=$(aws ec2 describe-security-groups \
+            --filters "Name=tag:Project,Values=petclinic-k8s" \
+            --query 'SecurityGroups[?GroupName!=`default`].GroupId' \
+            --output text)
+          
+          if [ -n "$SG_IDS" ]; then
+            # Try multiple times as there might be dependencies
+            for i in {1..3}; do
+              echo "  Deletion attempt $i..."
+              for SG_ID in $SG_IDS; do
+                aws ec2 delete-security-group --group-id "$SG_ID" 2>/dev/null && \
+                  echo "    ✅ Deleted: $SG_ID" || \
+                  echo "    ⏳ Waiting: $SG_ID"
+              done
+              [ $i -lt 3 ] && sleep 10
+            done
+          else
+            echo "  ℹ️ No security groups found"
+          fi
+          
+          echo ""
+          
+          # 8. Delete Subnets
+          echo "8️⃣ Deleting Subnets..."
+          SUBNET_IDS=$(aws ec2 describe-subnets \
+            --filters "Name=tag:Project,Values=petclinic-k8s" \
+            --query 'Subnets[].SubnetId' \
+            --output text)
+          
+          if [ -n "$SUBNET_IDS" ]; then
+            for SUBNET_ID in $SUBNET_IDS; do
+              echo "  Deleting: $SUBNET_ID"
+              aws ec2 delete-subnet --subnet-id "$SUBNET_ID" 2>/dev/null || true
+            done
+            echo "  ✅ Subnets deleted"
+          else
+            echo "  ℹ️ No subnets found"
+          fi
+          
+          echo ""
+          
+          # 9. Detach and Delete Internet Gateways
+          echo "9️⃣ Deleting Internet Gateways..."
+          VPC_IDS=$(aws ec2 describe-vpcs \
+            --filters "Name=tag:Project,Values=petclinic-k8s" \
+            --query 'Vpcs[].VpcId' \
+            --output text)
+          
+          for VPC_ID in $VPC_IDS; do
+            IGW_IDS=$(aws ec2 describe-internet-gateways \
+              --filters "Name=attachment.vpc-id,Values=$VPC_ID" \
+              --query 'InternetGateways[].InternetGatewayId' \
+              --output text)
+            
+            for IGW_ID in $IGW_IDS; do
+              echo "  Detaching IGW: $IGW_ID from VPC: $VPC_ID"
+              aws ec2 detach-internet-gateway \
+                --internet-gateway-id "$IGW_ID" \
+                --vpc-id "$VPC_ID" 2>/dev/null || true
+              
+              echo "  Deleting IGW: $IGW_ID"
+              aws ec2 delete-internet-gateway \
+                --internet-gateway-id "$IGW_ID" 2>/dev/null || true
+            done
           done
           
-          echo "✅ Cleanup completed!"
+          echo ""
+          
+          # 10. Delete Route Tables (except main)
+          echo "🔟 Deleting Route Tables..."
+          for VPC_ID in $VPC_IDS; do
+            RT_IDS=$(aws ec2 describe-route-tables \
+              --filters "Name=vpc-id,Values=$VPC_ID" \
+                        "Name=tag:Project,Values=petclinic-k8s" \
+              --query 'RouteTables[?Associations[0].Main!=`true`].RouteTableId' \
+              --output text)
+            
+            for RT_ID in $RT_IDS; do
+              echo "  Deleting: $RT_ID"
+              aws ec2 delete-route-table --route-table-id "$RT_ID" 2>/dev/null || true
+            done
+          done
+          
+          echo ""
+          
+          # 11. Delete VPCs
+          echo "1️⃣1️⃣ Deleting VPCs..."
+          if [ -n "$VPC_IDS" ]; then
+            for VPC_ID in $VPC_IDS; do
+              echo "  Deleting VPC: $VPC_ID"
+              aws ec2 delete-vpc --vpc-id "$VPC_ID" 2>/dev/null || true
+            done
+            echo "  ✅ VPCs deleted"
+          else
+            echo "  ℹ️ No VPCs found"
+          fi
+          
+          echo ""
+          
+          # 12. Delete Key Pair
+          echo "1️⃣2️⃣ Deleting Key Pair..."
+          aws ec2 delete-key-pair --key-name petclinic-test-key 2>/dev/null && \
+            echo "  ✅ Key pair deleted" || \
+            echo "  ℹ️ Key pair not found"
+          
+          echo ""
+          echo "════════════════════════════════════════"
+          echo "✅ Manual cleanup completed!"
+          echo "════════════════════════════════════════"
       
       - name: 🗑️ Delete S3 Bucket
         if: github.event.inputs.delete_s3_bucket == 'true'
@@ -196,15 +482,73 @@ jobs:
           
           BUCKET_NAME="petclinic-atos"
           
-          echo "Emptying bucket..."
-          aws s3 rm s3://${BUCKET_NAME} --recursive || true
+          # Check if bucket exists
+          if aws s3api head-bucket --bucket "$BUCKET_NAME" 2>/dev/null; then
+            echo "Emptying bucket..."
+            aws s3 rm "s3://${BUCKET_NAME}" --recursive || true
+            
+            echo "Deleting bucket..."
+            aws s3api delete-bucket --bucket "$BUCKET_NAME" --region ${{ env.AWS_REGION }} || true
+            
+            echo "✅ S3 Bucket deleted!"
+          else
+            echo "ℹ️ S3 Bucket not found or already deleted"
+          fi
+      
+      - name: 🧹 Clean Local State
+        if: always()
+        working-directory: terraform-k8s-infrastructure
+        continue-on-error: true
+        run: |
+          echo "════════════════════════════════════════"
+          echo "🧹 Cleaning local state files..."
+          echo "════════════════════════════════════════"
           
-          echo "Deleting bucket..."
-          aws s3api delete-bucket \
-            --bucket ${BUCKET_NAME} \
-            --region ${{ env.AWS_REGION }} || true
+          rm -f terraform.tfstate
+          rm -f terraform.tfstate.backup
+          rm -f .terraform.lock.hcl
+          rm -rf .terraform/
           
-          echo "✅ S3 Bucket deleted!"
+          echo "✅ Local state cleaned!"
+      
+      - name: 🔍 Verify Cleanup
+        if: always()
+        run: |
+          echo "════════════════════════════════════════"
+          echo "🔍 Verifying Resource Cleanup..."
+          echo "════════════════════════════════════════"
+          
+          echo ""
+          echo "Remaining EC2 Instances:"
+          REMAINING_INSTANCES=$(aws ec2 describe-instances \
+            --filters "Name=tag:Project,Values=petclinic-k8s" \
+                      "Name=instance-state-name,Values=running,stopped,pending" \
+            --query 'Reservations[].Instances[].InstanceId' \
+            --output text | wc -w)
+          echo "  Count: $REMAINING_INSTANCES"
+          
+          echo ""
+          echo "Remaining VPCs:"
+          REMAINING_VPCS=$(aws ec2 describe-vpcs \
+            --filters "Name=tag:Project,Values=petclinic-k8s" \
+            --query 'Vpcs[].VpcId' \
+            --output text | wc -w)
+          echo "  Count: $REMAINING_VPCS"
+          
+          echo ""
+          echo "Remaining Load Balancers:"
+          REMAINING_LBS=$(aws elbv2 describe-load-balancers \
+            --query 'LoadBalancers[?contains(LoadBalancerName, `k8s`)].LoadBalancerName' \
+            --output text | wc -w)
+          echo "  Count: $REMAINING_LBS"
+          
+          echo ""
+          if [ "$REMAINING_INSTANCES" -eq 0 ] && [ "$REMAINING_VPCS" -eq 0 ] && [ "$REMAINING_LBS" -eq 0 ]; then
+            echo "✅ All resources cleaned up successfully!"
+          else
+            echo "⚠️ Some resources may still remain"
+            echo "Check AWS Console for any remaining resources"
+          fi
       
       - name: ✅ Destroy Complete
         if: success()
@@ -214,9 +558,19 @@ jobs:
           echo "  ✅ Destroy Completed Successfully!"
           echo "════════════════════════════════════════"
           echo ""
-          echo "📊 All resources have been destroyed"
+          echo "📊 All infrastructure has been destroyed"
           echo ""
-          echo "💰 AWS charges will stop immediately"
+          echo "💰 Cost Impact:"
+          echo "────────────────────────────────────────"
+          echo "  • AWS charges will stop immediately"
+          echo "  • No more EC2 hourly charges"
+          echo "  • No more NAT Gateway charges (~$0.045/hr)"
+          echo "  • No more EBS storage charges"
           echo ""
-          echo "🔄 To redeploy, run the Apply workflow"
+          echo "🔄 To redeploy:"
+          echo "────────────────────────────────────────"
+          echo "  1. Run '02 - Terraform Apply' workflow"
+          echo "  2. Wait ~10 minutes"
+          echo "  3. Run '03 - Ansible Provision' workflow"
+          echo "  4. Cluster will be fully recreated"
           echo ""
