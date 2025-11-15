@@ -13,6 +13,12 @@ on:
         required: false
         type: boolean
         default: false
+      
+      force_cleanup:
+        description: 'Force cleanup of stuck resources'
+        required: false
+        type: boolean
+        default: false
 
 env:
   TF_VERSION: '1.6.0'
@@ -40,8 +46,6 @@ jobs:
             echo ""
             echo "You must type 'destroy' exactly to confirm."
             echo "Current input: '${{ github.event.inputs.confirm_destroy }}'"
-            echo ""
-            echo "This is a safety measure to prevent accidental deletion."
             echo ""
             exit 1
           fi
@@ -72,6 +76,32 @@ jobs:
           terraform_version: ${{ env.TF_VERSION }}
           terraform_wrapper: false
       
+      - name: 🛡️ Disable Termination Protection
+        if: github.event.inputs.force_cleanup == 'true'
+        continue-on-error: true
+        run: |
+          echo "════════════════════════════════════════"
+          echo "🛡️ Disabling Termination Protection..."
+          echo "════════════════════════════════════════"
+          
+          INSTANCE_IDS=$(aws ec2 describe-instances \
+            --filters "Name=tag:Project,Values=petclinic-k8s" \
+                      "Name=instance-state-name,Values=running,stopped" \
+            --query 'Reservations[].Instances[].InstanceId' \
+            --output text)
+          
+          if [ -n "$INSTANCE_IDS" ]; then
+            for INSTANCE_ID in $INSTANCE_IDS; do
+              echo "Disabling protection for: $INSTANCE_ID"
+              aws ec2 modify-instance-attribute \
+                --instance-id $INSTANCE_ID \
+                --no-disable-api-termination || true
+            done
+            echo "✅ Termination protection disabled!"
+          else
+            echo "ℹ️ No instances found"
+          fi
+      
       - name: ⚙️ Terraform Init
         working-directory: terraform-k8s-infrastructure
         run: |
@@ -91,7 +121,7 @@ jobs:
           
           echo ""
           echo "Total resources:"
-          terraform state list | wc -l
+          terraform state list 2>/dev/null | wc -l || echo "0"
       
       - name: ⏸️ Final Confirmation
         run: |
@@ -99,17 +129,7 @@ jobs:
           echo "⚠️  FINAL WARNING"
           echo "════════════════════════════════════════"
           echo ""
-          echo "This will PERMANENTLY DELETE:"
-          echo "  • 1 VPC with subnets"
-          echo "  • 1 Bastion host"
-          echo "  • 3 Master nodes"
-          echo "  • 3 Worker nodes"
-          echo "  • 3 NAT Gateways"
-          echo "  • 3 Elastic IPs"
-          echo "  • 1 Network Load Balancer"
-          echo "  • All Security Groups"
-          echo "  • All EBS volumes"
-          echo "  • SSH key pair"
+          echo "This will PERMANENTLY DELETE all infrastructure"
           echo ""
           echo "Waiting 10 seconds before proceeding..."
           sleep 10
@@ -122,13 +142,53 @@ jobs:
           echo "🗑️ Starting Terraform Destroy..."
           echo "════════════════════════════════════════"
           
-          terraform destroy -auto-approve -input=false
+          MAX_RETRIES=3
+          RETRY_COUNT=0
           
-          echo ""
-          echo "✅ Terraform Destroy Completed!"
+          while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
+            echo "Attempt $((RETRY_COUNT + 1)) of $MAX_RETRIES..."
+            
+            if terraform destroy -auto-approve -input=false; then
+              echo "✅ Destroy successful!"
+              exit 0
+            else
+              RETRY_COUNT=$((RETRY_COUNT + 1))
+              if [ $RETRY_COUNT -lt $MAX_RETRIES ]; then
+                echo "⚠️ Destroy failed, waiting 30 seconds before retry..."
+                sleep 30
+              else
+                echo "❌ Destroy failed after $MAX_RETRIES attempts"
+                echo "Try running with 'force_cleanup' enabled"
+                exit 1
+              fi
+            fi
+          done
       
-      - name: 🗑️ Delete S3 Bucket (Optional)
+      - name: 🔌 Cleanup Stuck Resources
+        if: failure() && github.event.inputs.force_cleanup == 'true'
+        continue-on-error: true
+        run: |
+          echo "════════════════════════════════════════"
+          echo "🔌 Force cleaning stuck resources..."
+          echo "════════════════════════════════════════"
+          
+          # Delete available ENIs
+          ENI_IDS=$(aws ec2 describe-network-interfaces \
+            --filters "Name=tag:Project,Values=petclinic-k8s" \
+            --query 'NetworkInterfaces[?Status==`available`].NetworkInterfaceId' \
+            --output text)
+          
+          for ENI_ID in $ENI_IDS; do
+            echo "Deleting ENI: $ENI_ID"
+            aws ec2 delete-network-interface \
+              --network-interface-id $ENI_ID || true
+          done
+          
+          echo "✅ Cleanup completed!"
+      
+      - name: 🗑️ Delete S3 Bucket
         if: github.event.inputs.delete_s3_bucket == 'true'
+        continue-on-error: true
         run: |
           echo "════════════════════════════════════════"
           echo "🗑️ Deleting S3 Bucket..."
@@ -136,70 +196,27 @@ jobs:
           
           BUCKET_NAME="petclinic-atos"
           
-          # Empty bucket first
           echo "Emptying bucket..."
-          aws s3 rm s3://${BUCKET_NAME} --recursive || echo "Bucket already empty"
+          aws s3 rm s3://${BUCKET_NAME} --recursive || true
           
-          # Delete bucket
           echo "Deleting bucket..."
-          aws s3api delete-bucket --bucket ${BUCKET_NAME} --region ${{ env.AWS_REGION }} || echo "Bucket already deleted"
+          aws s3api delete-bucket \
+            --bucket ${BUCKET_NAME} \
+            --region ${{ env.AWS_REGION }} || true
           
           echo "✅ S3 Bucket deleted!"
       
-      - name: 🧹 Clean Local State
-        working-directory: terraform-k8s-infrastructure
-        run: |
-          echo "════════════════════════════════════════"
-          echo "🧹 Cleaning local state files..."
-          echo "════════════════════════════════════════"
-          
-          rm -f terraform.tfstate
-          rm -f terraform.tfstate.backup
-          rm -f .terraform.lock.hcl
-          rm -rf .terraform/
-          
-          echo "✅ Local state cleaned!"
-      
-      - name: 🧹 Delete Old Artifacts (Optional)
-        continue-on-error: true
-        run: |
-          echo "════════════════════════════════════════"
-          echo "🧹 Note: Old artifacts will expire automatically"
-          echo "════════════════════════════════════════"
-          echo ""
-          echo "Artifacts are kept for 7 days by default"
-          echo "You can manually delete them from:"
-          echo "  Actions → Select workflow run → Delete"
-      
       - name: ✅ Destroy Complete
+        if: success()
         run: |
           echo ""
-          echo "╔════════════════════════════════════════╗"
-          echo "║  ✅ Destroy Completed Successfully!   ║"
-          echo "╚════════════════════════════════════════╝"
+          echo "════════════════════════════════════════"
+          echo "  ✅ Destroy Completed Successfully!"
+          echo "════════════════════════════════════════"
           echo ""
-          echo "📊 Destroyed Resources:"
-          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-          echo "  ✅ All EC2 instances deleted"
-          echo "  ✅ VPC and networking deleted"
-          echo "  ✅ Load balancers deleted"
-          echo "  ✅ Security groups deleted"
-          echo "  ✅ EBS volumes deleted"
-          echo "  ✅ SSH key pair deleted"
-          if [ "${{ github.event.inputs.delete_s3_bucket }}" == "true" ]; then
-            echo "  ✅ S3 bucket deleted"
-          fi
+          echo "📊 All resources have been destroyed"
           echo ""
-          echo "💰 Cost Impact:"
-          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-          echo "  • AWS charges will stop immediately"
-          echo "  • No more EC2 hourly charges"
-          echo "  • No more NAT Gateway charges"
-          echo "  • No more EBS storage charges"
+          echo "💰 AWS charges will stop immediately"
           echo ""
-          echo "🔄 To redeploy:"
-          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-          echo "  1. Run '02 - Terraform Apply' workflow"
-          echo "  2. Wait ~10 minutes"
-          echo "  3. Cluster will be recreated"
+          echo "🔄 To redeploy, run the Apply workflow"
           echo ""
