@@ -26,6 +26,7 @@ allowed_ssh_cidr = "0.0.0.0/0"  # Change to your IP for security
 enable_monitoring = true
 
 
-bucket_name = "petclinic-atos"
+bucket_name = "petclinic-atos-19-reem"
+
 
 
