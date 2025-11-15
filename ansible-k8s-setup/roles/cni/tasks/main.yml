@@ -1,0 +1,101 @@
+---
+# ============================================
+# CNI Role - Install Calico CNI
+# ============================================
+
+- name: Check if Calico is already installed
+  command: kubectl get pods -n kube-system -l k8s-app=calico-node
+  register: calico_check
+  failed_when: false
+  changed_when: false
+
+- name: Display Calico status
+  debug:
+    msg: "Calico is {{ 'already installed' if calico_check.rc == 0 else 'NOT installed' }}"
+
+- name: Install Calico CNI
+  block:
+    - name: Download Calico manifest
+      get_url:
+        url: "{{ calico_manifest_url }}"
+        dest: /tmp/calico.yaml
+        mode: '0644'
+        timeout: 60
+
+    - name: Modify Calico manifest for custom pod CIDR
+      replace:
+        path: /tmp/calico.yaml
+        regexp: '192\.168\.0\.0/16'
+        replace: "{{ pod_network_cidr }}"
+      when: pod_network_cidr != "192.168.0.0/16"
+
+    - name: Display Calico manifest (first 50 lines)
+      shell: head -50 /tmp/calico.yaml
+      register: calico_manifest
+      changed_when: false
+
+    - name: Show Calico manifest preview
+      debug:
+        msg: "{{ calico_manifest.stdout_lines }}"
+
+    - name: Apply Calico manifest
+      command: kubectl apply -f /tmp/calico.yaml
+      register: calico_apply
+
+    - name: Display Calico apply output
+      debug:
+        msg: "{{ calico_apply.stdout_lines }}"
+
+    - name: Wait for Calico pods to be ready
+      command: >
+        kubectl wait --for=condition=Ready pods
+        -l k8s-app=calico-node
+        -n kube-system
+        --timeout={{ pod_ready_timeout }}s
+      register: calico_ready
+      retries: 3
+      delay: 10
+
+    - name: Display Calico readiness
+      debug:
+        msg: "{{ calico_ready.stdout_lines }}"
+
+  when: calico_check.rc != 0
+
+- name: Get Calico pods status
+  command: kubectl get pods -n kube-system -l k8s-app=calico-node -o wide
+  register: calico_pods
+  changed_when: false
+
+- name: Display Calico pods
+  debug:
+    msg: "{{ calico_pods.stdout_lines }}"
+
+- name: Get all nodes status
+  command: kubectl get nodes -o wide
+  register: nodes_status
+  changed_when: false
+
+- name: Display nodes status
+  debug:
+    msg: "{{ nodes_status.stdout_lines }}"
+
+- name: Verify all nodes are Ready
+  command: kubectl get nodes --no-headers
+  register: nodes_check
+  failed_when: "'NotReady' in nodes_check.stdout"
+  changed_when: false
+
+- name: Display CNI installation summary
+  debug:
+    msg: |
+      ╔═══════════════════════════════════════════════════════╗
+      ║  ✅ Calico CNI Installed Successfully!               ║
+      ╚═══════════════════════════════════════════════════════╝
+      
+      Network Configuration:
+      • Pod Network: {{ pod_network_cidr }}
+      • Service Network: {{ service_cidr }}
+      • CNI: Calico {{ calico_version }}
+      
+      All nodes should now be in Ready state!

@@ -1,0 +1,105 @@
+---
+# متغيرات عامة لكل الـ nodes
+
+# معلومات الـ cluster
+cluster_name: petclinic
+environment: test
+
+# Kubernetes version
+k8s_version: "1.28"
+
+# Control plane endpoint (Load Balancer DNS)
+control_plane_endpoint: "petclinic-test-master-nlb-xyz.elb.us-east-1.amazonaws.com:6443"
+
+# Pod network CIDR (لـ Calico)
+pod_network_cidr: "192.168.0.0/16"
+
+# Service CIDR
+service_cidr: "10.96.0.0/12"
+
+# DNS domain
+dns_domain: "cluster.local"
+
+# Kubernetes namespaces (ONE BLOCK ONLY)
+k8s_namespaces:
+  - name: dev
+    labels:
+      environment: development
+      team: devops
+  - name: test
+    labels:
+      environment: testing
+      team: qa
+  - name: prod
+    labels:
+      environment: production
+      team: operations
+
+# CNI Configuration (Calico)
+cni_type: calico
+calico_version: "v3.27.0"
+calico_manifest_url: "https://raw.githubusercontent.com/projectcalico/calico/{{ calico_version }}/manifests/calico.yaml"
+
+# Timeouts and retries
+kubeadm_init_timeout: 600
+kubeadm_join_timeout: 300
+pod_ready_timeout: 300
+
+# Directories
+k8s_config_dir: "/etc/kubernetes"
+k8s_manifests_dir: "/etc/kubernetes/manifests"
+k8s_pki_dir: "/etc/kubernetes/pki"
+
+api_server_port: 6443
+
+# Ingress Controller Version
+ingress_version: "v1.9.5"
+
+# ============================================
+# API Server & Ingress Configuration
+# ============================================
+api_server_port: 6443
+ingress_version: "v1.9.5"
+
+# ============================================
+# Kubernetes Namespaces with Resource Quotas
+# ============================================
+k8s_namespaces:
+  - name: dev
+    labels:
+      environment: development
+      team: devops
+    resource_quota:
+      requests.cpu: "10"
+      requests.memory: "20Gi"
+      limits.cpu: "20"
+      limits.memory: "40Gi"
+      pods: "50"
+      services: "20"
+      persistentvolumeclaims: "10"
+  
+  - name: test
+    labels:
+      environment: testing
+      team: qa
+    resource_quota:
+      requests.cpu: "8"
+      requests.memory: "16Gi"
+      limits.cpu: "16"
+      limits.memory: "32Gi"
+      pods: "40"
+      services: "15"
+      persistentvolumeclaims: "8"
+  
+  - name: prod
+    labels:
+      environment: production
+      team: operations
+    resource_quota:
+      requests.cpu: "20"
+      requests.memory: "40Gi"
+      limits.cpu: "40"
+      limits.memory: "80Gi"
+      pods: "100"
+      services: "30"
+      persistentvolumeclaims: "20"

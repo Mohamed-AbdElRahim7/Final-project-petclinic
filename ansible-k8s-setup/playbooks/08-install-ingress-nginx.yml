@@ -1,0 +1,178 @@
+---
+# ============================================
+# Playbook 8: Install NGINX Ingress Controller
+# Purpose: Enable external access to services
+# ============================================
+
+- name: Install NGINX Ingress Controller
+  hosts: first_master
+  gather_facts: no
+  become: yes
+  
+  tasks:
+    - name: Check if Ingress Controller is already installed
+      command: kubectl get pods -n ingress-nginx -l app.kubernetes.io/name=ingress-nginx
+      register: ingress_check
+      failed_when: false
+      changed_when: false
+
+    - name: Display Ingress status
+      debug:
+        msg: "Ingress is {{ 'already installed' if ingress_check.rc == 0 else 'NOT installed' }}"
+
+    - block:
+        - name: Create ingress-nginx namespace
+          command: kubectl create namespace ingress-nginx --dry-run=client -o yaml | kubectl apply -f -
+          register: ns_create
+
+        - name: Download NGINX Ingress manifest
+          get_url:
+            url: "https://raw.githubusercontent.com/kubernetes/ingress-nginx/controller-{{ ingress_version }}/deploy/static/provider/aws/deploy.yaml"
+            dest: /tmp/ingress-nginx.yaml
+            mode: '0644'
+
+        - name: Modify Ingress for NLB integration
+          blockinfile:
+            path: /tmp/ingress-nginx.yaml
+            marker: "# {mark} ANSIBLE MANAGED BLOCK - NLB"
+            insertafter: "kind: Service"
+            block: |2
+                annotations:
+                  service.beta.kubernetes.io/aws-load-balancer-type: "nlb"
+                  service.beta.kubernetes.io/aws-load-balancer-cross-zone-load-balancing-enabled: "true"
+                  service.beta.kubernetes.io/aws-load-balancer-backend-protocol: "tcp"
+
+        - name: Apply NGINX Ingress manifest
+          command: kubectl apply -f /tmp/ingress-nginx.yaml
+          register: ingress_apply
+
+        - name: Display Ingress apply output
+          debug:
+            msg: "{{ ingress_apply.stdout_lines }}"
+
+        - name: Wait for Ingress Controller pods to be ready
+          command: >
+            kubectl wait --namespace ingress-nginx
+            --for=condition=ready pod
+            --selector=app.kubernetes.io/component=controller
+            --timeout={{ pod_ready_timeout }}s
+          register: ingress_ready
+          retries: 3
+          delay: 10
+
+        - name: Display Ingress readiness
+          debug:
+            msg: "{{ ingress_ready.stdout_lines }}"
+
+      when: ingress_check.rc != 0
+
+    - name: Get Ingress Controller pods
+      command: kubectl get pods -n ingress-nginx -o wide
+      register: ingress_pods
+
+    - name: Display Ingress pods
+      debug:
+        msg: "{{ ingress_pods.stdout_lines }}"
+
+    - name: Get Ingress Service details
+      command: kubectl get svc -n ingress-nginx
+      register: ingress_svc
+
+    - name: Display Ingress service
+      debug:
+        msg: "{{ ingress_svc.stdout_lines }}"
+
+    - name: Get LoadBalancer endpoint
+      shell: |
+        kubectl get svc ingress-nginx-controller -n ingress-nginx \
+        -o jsonpath='{.status.loadBalancer.ingress[0].hostname}'
+      register: lb_endpoint
+      until: lb_endpoint.stdout != ""
+      retries: 10
+      delay: 30
+      failed_when: false
+
+    - name: Display LoadBalancer endpoint
+      debug:
+        msg: |
+          {% if lb_endpoint.stdout %}
+          ✅ Ingress LoadBalancer: {{ lb_endpoint.stdout }}
+          {% else %}
+          ⚠️  LoadBalancer endpoint not ready yet. Check AWS console.
+          {% endif %}
+
+    - name: Create test Ingress resource
+      shell: |
+        cat <<EOF | kubectl apply -f -
+        apiVersion: networking.k8s.io/v1
+        kind: Ingress
+        metadata:
+          name: test-ingress
+          namespace: default
+          annotations:
+            nginx.ingress.kubernetes.io/rewrite-target: /
+        spec:
+          ingressClassName: nginx
+          rules:
+          - host: test.{{ cluster_name }}.local
+            http:
+              paths:
+              - path: /
+                pathType: Prefix
+                backend:
+                  service:
+                    name: kubernetes
+                    port:
+                      number: 443
+        EOF
+      register: test_ingress
+      changed_when: "'created' in test_ingress.stdout or 'configured' in test_ingress.stdout"
+
+    - name: Verify IngressClass
+      command: kubectl get ingressclass
+      register: ingress_class
+
+    - name: Display IngressClass
+      debug:
+        msg: "{{ ingress_class.stdout_lines }}"
+
+  post_tasks:
+    - name: Summary - Ingress installed
+      debug:
+        msg: |
+          ╔═══════════════════════════════════════════════════════╗
+          ║  ✅ NGINX Ingress Controller Installed!              ║
+          ╚═══════════════════════════════════════════════════════╝
+          
+          📊 Ingress Configuration:
+          • Namespace: ingress-nginx
+          • IngressClass: nginx
+          • LoadBalancer Type: AWS NLB
+          {% if lb_endpoint.stdout %}
+          • Endpoint: {{ lb_endpoint.stdout }}
+          {% endif %}
+          
+          🎯 Usage Example:
+          ```yaml
+          apiVersion: networking.k8s.io/v1
+          kind: Ingress
+          metadata:
+            name: myapp-ingress
+            namespace: dev
+          spec:
+            ingressClassName: nginx
+            rules:
+            - host: myapp.example.com
+              http:
+                paths:
+                - path: /
+                  pathType: Prefix
+                  backend:
+                    service:
+                      name: myapp-service
+                      port:
+                        number: 80
+          ```
+          
+          🔗 Access your apps via:
+          http://<LB-ENDPOINT>

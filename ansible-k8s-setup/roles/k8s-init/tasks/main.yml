@@ -1,0 +1,142 @@
+---
+# ============================================
+# K8s Init Role - Initialize First Master
+# ============================================
+
+- name: Check if Kubernetes is already initialized
+  stat:
+    path: /etc/kubernetes/admin.conf
+  register: k8s_initialized
+
+- name: Display initialization status
+  debug:
+    msg: "Kubernetes is {{ 'already initialized' if k8s_initialized.stat.exists else 'NOT initialized' }}"
+
+- name: Initialize Kubernetes cluster
+  block:
+    - name: Create kubeadm configuration directory
+      file:
+        path: /tmp/kubeadm-config
+        state: directory
+        mode: '0755'
+
+    - name: Create kubeadm configuration file
+      template:
+        src: kubeadm-config.yml.j2
+        dest: /tmp/kubeadm-config.yaml
+        mode: '0644'
+
+    - name: Display kubeadm configuration
+      command: cat /tmp/kubeadm-config.yaml
+      register: kubeadm_config_content
+      changed_when: false
+
+    - name: Show kubeadm configuration
+      debug:
+        msg: "{{ kubeadm_config_content.stdout_lines }}"
+
+    - name: Run kubeadm init
+      command: >
+        kubeadm init
+        --config /tmp/kubeadm-config.yaml
+        --upload-certs
+        --v=5
+      register: kubeadm_init
+      async: "{{ kubeadm_init_timeout }}"
+      poll: 10
+
+    - name: Display kubeadm init output
+      debug:
+        msg: "{{ kubeadm_init.stdout_lines }}"
+
+    - name: Save kubeadm init output to file
+      copy:
+        content: "{{ kubeadm_init.stdout }}"
+        dest: /tmp/kubeadm-init-output.txt
+        mode: '0644'
+
+    - name: Extract join commands
+      shell: |
+        # Extract control-plane join command
+        grep -A 3 "kubeadm join.*--control-plane" /tmp/kubeadm-init-output.txt > /tmp/master-join-command.sh || true
+        
+        # Extract worker join command
+        grep -A 1 "kubeadm join" /tmp/kubeadm-init-output.txt | grep -v "control-plane" | tail -3 > /tmp/worker-join-command.sh || true
+      args:
+        executable: /bin/bash
+
+    - name: Create .kube directory for root
+      file:
+        path: /root/.kube
+        state: directory
+        mode: '0755'
+
+    - name: Copy admin.conf to root's kubeconfig
+      copy:
+        src: /etc/kubernetes/admin.conf
+        dest: /root/.kube/config
+        remote_src: yes
+        mode: '0644'
+
+    - name: Create .kube directory for ubuntu user
+      file:
+        path: /home/ubuntu/.kube
+        state: directory
+        owner: ubuntu
+        group: ubuntu
+        mode: '0755'
+
+    - name: Copy admin.conf to ubuntu user
+      copy:
+        src: /etc/kubernetes/admin.conf
+        dest: /home/ubuntu/.kube/config
+        remote_src: yes
+        owner: ubuntu
+        group: ubuntu
+        mode: '0644'
+
+    - name: Wait for API server to be ready
+      command: kubectl get nodes
+      register: kubectl_get_nodes
+      until: kubectl_get_nodes.rc == 0
+      retries: 30
+      delay: 10
+      changed_when: false
+
+    - name: Display cluster nodes
+      debug:
+        msg: "{{ kubectl_get_nodes.stdout_lines }}"
+
+    - name: Get cluster info
+      command: kubectl cluster-info
+      register: cluster_info
+      changed_when: false
+
+    - name: Display cluster info
+      debug:
+        msg: "{{ cluster_info.stdout_lines }}"
+
+    - name: Remove taints from first master (optional for testing)
+      command: >
+        kubectl taint nodes {{ ansible_hostname }}
+        node-role.kubernetes.io/control-plane:NoSchedule-
+      register: taint_removal
+      failed_when: false
+      changed_when: "'untainted' in taint_removal.stdout"
+
+  when: not k8s_initialized.stat.exists
+
+- name: Display initialization summary
+  debug:
+    msg: |
+      ╔═══════════════════════════════════════════════════════╗
+      ║  ✅ First Master Initialized Successfully!           ║
+      ╚═══════════════════════════════════════════════════════╝
+      
+      Master: {{ ansible_hostname }}
+      Control Plane: {{ control_plane_endpoint }}
+      
+      Next Steps:
+      1. Join other masters
+      2. Join workers
+      3. Install CNI

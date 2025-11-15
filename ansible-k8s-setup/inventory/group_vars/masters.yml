@@ -1,0 +1,48 @@
+---
+# ============================================
+# Variables Specific to Master Nodes
+# ============================================
+
+# Node Role
+k8s_role: master
+
+# Node Labels (applied during join)
+node_labels:
+  node-role.kubernetes.io/control-plane: ""
+  node-role.kubernetes.io/master: ""
+  node-type: "master"
+
+# Node Taints (prevent workloads from running on masters)
+node_taints:
+  - key: "node-role.kubernetes.io/control-plane"
+    effect: "NoSchedule"
+
+# etcd Configuration
+etcd_data_dir: "/var/lib/etcd"
+etcd_snapshot_dir: "/var/lib/etcd/snapshots"
+etcd_backup_enabled: true
+
+# API Server Extra Arguments
+api_server_extra_args:
+  enable-admission-plugins: "NodeRestriction"
+  audit-log-path: "/var/log/kubernetes/audit.log"
+  audit-log-maxage: "7"
+  audit-log-maxbackup: "10"
+  audit-log-maxsize: "100"
+
+# Controller Manager Extra Arguments
+controller_manager_extra_args:
+  node-monitor-grace-period: "40s"
+  pod-eviction-timeout: "30s"
+  bind-address: "0.0.0.0"
+
+# Scheduler Extra Arguments
+scheduler_extra_args:
+  bind-address: "0.0.0.0"
+
+# Resource Reservations (to ensure master stability)
+master_cpu_reserved: "1000m"    # 1 CPU core
+master_memory_reserved: "2Gi"    # 2GB RAM
+
+# Master-specific settings
+master_max_pods: 110

@@ -1,0 +1,230 @@
+---
+# ============================================
+# Playbook 1: Verify All Nodes are Ready
+# Purpose: Ensure user-data scripts completed successfully
+# ============================================
+
+- name: Verify All Nodes are Ready
+  hosts: k8s_cluster
+  gather_facts: yes
+  become: yes
+  
+  pre_tasks:
+    - name: Wait for system to be ready
+      wait_for_connection:
+        timeout: 300
+        delay: 5
+      
+  tasks:
+    - name: Display node information
+      debug:
+        msg: |
+          ═══════════════════════════════════════
+          Node: {{ ansible_hostname }}
+          IP: {{ ansible_default_ipv4.address }}
+          Role: {{ k8s_role }}
+          OS: {{ ansible_distribution }} {{ ansible_distribution_version }}
+          ═══════════════════════════════════════
+
+    - name: Check if node-ready marker exists
+      stat:
+        path: /tmp/node-ready
+      register: node_ready_marker
+
+    - name: Fail if node is not ready
+      fail:
+        msg: |
+          ❌ Node {{ ansible_hostname }} is NOT ready!
+          User data script may have failed.
+          Check /var/log/cloud-init-output.log
+      when: not node_ready_marker.stat.exists
+
+    - name: Check swap is disabled
+      shell: cat /proc/swaps | wc -l
+      register: swap_check
+      changed_when: false
+
+    - name: Verify swap is disabled
+      assert:
+        that:
+          - swap_check.stdout | int == 1
+        fail_msg: "❌ Swap is NOT disabled on {{ ansible_hostname }}"
+        success_msg: "✅ Swap is disabled"
+
+    - name: Check containerd is running
+      systemd:
+        name: containerd
+        state: started
+      check_mode: yes
+      register: containerd_status
+
+    - name: Verify containerd status
+      assert:
+        that:
+          - containerd_status.status.ActiveState == "active"
+        fail_msg: "❌ Containerd is NOT running on {{ ansible_hostname }}"
+        success_msg: "✅ Containerd is running"
+
+    - name: Check kubelet is enabled
+      systemd:
+        name: kubelet
+        enabled: yes
+      check_mode: yes
+      register: kubelet_status
+
+    - name: Verify kubelet is enabled
+      assert:
+        that:
+          - kubelet_status.enabled
+        fail_msg: "❌ Kubelet is NOT enabled on {{ ansible_hostname }}"
+        success_msg: "✅ Kubelet is enabled"
+
+    - name: Check kubeadm version
+      command: kubeadm version -o short
+      register: kubeadm_version
+      changed_when: false
+
+    - name: Display kubeadm version
+      debug:
+        msg: "✅ kubeadm version: {{ kubeadm_version.stdout }}"
+
+    - name: Check kubectl version
+      command: kubectl version --client -o json
+      register: kubectl_version
+      changed_when: false
+      failed_when: false
+
+    - name: Display kubectl version
+      debug:
+        msg: "✅ kubectl is installed"
+      when: kubectl_version.rc == 0
+
+    - name: Check kernel modules
+      shell: lsmod | grep -E 'overlay|br_netfilter'
+      register: kernel_modules
+      changed_when: false
+
+    - name: Verify kernel modules
+      assert:
+        that:
+          - "'overlay' in kernel_modules.stdout"
+          - "'br_netfilter' in kernel_modules.stdout"
+        fail_msg: "❌ Required kernel modules NOT loaded on {{ ansible_hostname }}"
+        success_msg: "✅ Kernel modules loaded (overlay, br_netfilter)"
+
+    - name: Check sysctl parameters
+      shell: |
+        sysctl net.bridge.bridge-nf-call-iptables \
+               net.bridge.bridge-nf-call-ip6tables \
+               net.ipv4.ip_forward
+      register: sysctl_params
+      changed_when: false
+
+    - name: Verify sysctl parameters
+      assert:
+        that:
+          - "'net.bridge.bridge-nf-call-iptables = 1' in sysctl_params.stdout"
+          - "'net.ipv4.ip_forward = 1' in sysctl_params.stdout"
+        fail_msg: "❌ Sysctl parameters NOT configured correctly"
+        success_msg: "✅ Sysctl parameters configured"
+
+    - name: Check EBS volumes (Masters only)
+      stat:
+        path: "{{ etcd_data_dir }}"
+      register: etcd_volume
+      when: k8s_role == "master"
+
+    - name: Verify etcd volume mounted (Masters)
+      assert:
+        that:
+          - etcd_volume.stat.exists
+          - etcd_volume.stat.isdir
+        fail_msg: "❌ etcd volume NOT mounted on {{ ansible_hostname }}"
+        success_msg: "✅ etcd volume mounted at {{ etcd_data_dir }}"
+      when: k8s_role == "master"
+
+    - name: Check EBS volumes (Workers only)
+      stat:
+        path: "{{ containerd_data_dir }}"
+      register: containerd_volume
+      when: k8s_role == "worker"
+
+    - name: Verify containerd volume mounted (Workers)
+      assert:
+        that:
+          - containerd_volume.stat.exists
+          - containerd_volume.stat.isdir
+        fail_msg: "❌ containerd volume NOT mounted on {{ ansible_hostname }}"
+        success_msg: "✅ containerd volume mounted at {{ containerd_data_dir }}"
+      when: k8s_role == "worker"
+
+    - name: Check network connectivity to bastion
+      wait_for:
+        host: "{{ hostvars['bastion']['ansible_host'] }}"
+        port: 22
+        timeout: 10
+      delegate_to: localhost
+      become: no
+
+    - name: Test DNS resolution
+      command: nslookup google.com
+      register: dns_test
+      changed_when: false
+      failed_when: false
+
+    - name: Verify DNS
+      debug:
+        msg: "{{ '✅ DNS working' if dns_test.rc == 0 else '⚠️ DNS issues detected' }}"
+
+  post_tasks:
+    - name: Collect system facts
+      setup:
+        filter: ansible_*
+
+    - name: Summary - Node verification
+      debug:
+        msg: |
+          ╔═══════════════════════════════════════════════════════╗
+          ║  ✅ Node {{ ansible_hostname }} is READY!            ║
+          ╚═══════════════════════════════════════════════════════╝
+          
+          📊 Node Details:
+          • Hostname: {{ ansible_hostname }}
+          • IP: {{ ansible_default_ipv4.address }}
+          • Role: {{ k8s_role }}
+          • OS: {{ ansible_distribution }} {{ ansible_distribution_version }}
+          • CPU: {{ ansible_processor_vcpus }} cores
+          • RAM: {{ (ansible_memtotal_mb / 1024) | round(1) }} GB
+          
+          ✅ Checks Passed:
+          • Containerd: Running
+          • Kubelet: Enabled
+          • Swap: Disabled
+          • Kernel modules: Loaded
+          • Sysctl: Configured
+          {% if k8s_role == 'master' %}
+          • etcd volume: Mounted
+          {% else %}
+          • containerd volume: Mounted
+          {% endif %}
+          
+          🎯 Next: Initialize first master
+          ansible-playbook playbooks/02-init-first-master.yml
+
+- name: Final verification summary
+  hosts: localhost
+  gather_facts: no
+  tasks:
+    - name: Display cluster summary
+      debug:
+        msg: |
+          ╔═══════════════════════════════════════════════════════╗
+          ║  🎉 All Nodes Verified Successfully!                 ║
+          ╚═══════════════════════════════════════════════════════╝
+          
+          📊 Cluster Topology:
+          • Masters: {{ groups['masters'] | length }} nodes
+          • Workers: {{ groups['workers'] | length }} nodes
+          • Total: {{ groups['k8s_cluster'] | length }} nodes
+          
+          🚀 Ready to initialize Kubernetes cluster!

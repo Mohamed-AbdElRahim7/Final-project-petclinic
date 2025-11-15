@@ -1,0 +1,89 @@
+---
+# Playbook 4: إضافة الـ workers للـ cluster
+# الغرض: join كل الـ worker nodes
+
+- name: Join Workers to Cluster
+  hosts: workers
+  gather_facts: yes
+  become: yes
+  
+  tasks:
+    - name: Check if node is already joined
+      stat:
+        path: /etc/kubernetes/kubelet.conf
+      register: node_joined
+
+    - name: Display join status
+      debug:
+        msg: "Node {{ ansible_hostname }} is {{ 'already joined' if node_joined.stat.exists else 'NOT joined' }}"
+
+    - block:
+        - name: Get join token from first master
+          shell: |
+            kubeadm token create --print-join-command
+          delegate_to: "{{ groups['first_master'][0] }}"
+          register: join_command
+          run_once: yes
+
+        - name: Display join command
+          debug:
+            msg: "{{ join_command.stdout }}"
+
+        - name: Join worker to cluster
+          shell: |
+            {{ join_command.stdout }}
+          register: join_output
+          async: "{{ kubeadm_join_timeout }}"
+          poll: 10
+
+        - name: Display join output
+          debug:
+            msg: "{{ join_output.stdout_lines }}"
+
+        - name: Wait for node to be ready
+          command: kubectl get node {{ ansible_hostname }}
+          register: node_status
+          until: "'Ready' in node_status.stdout or 'NotReady' in node_status.stdout"
+          retries: 30
+          delay: 10
+          delegate_to: "{{ groups['first_master'][0] }}"
+
+        - name: Display node status
+          debug:
+            msg: "{{ node_status.stdout_lines }}"
+
+      when: not node_joined.stat.exists
+
+    - name: Label worker nodes
+      command: >
+        kubectl label node {{ ansible_hostname }}
+        node-role.kubernetes.io/worker=worker
+        --overwrite
+      delegate_to: "{{ groups['first_master'][0] }}"
+      when: not node_joined.stat.exists
+
+    - name: Verify all nodes in cluster
+      command: kubectl get nodes -o wide
+      register: all_nodes
+      delegate_to: "{{ groups['first_master'][0] }}"
+      run_once: yes
+
+    - name: Display all nodes
+      debug:
+        msg: "{{ all_nodes.stdout_lines }}"
+      run_once: yes
+
+  post_tasks:
+    - name: Summary - Workers joined
+      debug:
+        msg: |
+          ═══════════════════════════════════════════
+          ✅ Worker {{ ansible_hostname }} Joined Successfully!
+          ═══════════════════════════════════════════
+          
+          Current Cluster Status:
+          - Masters: {{ groups['masters'] | length }}
+          - Workers: {{ groups['workers'] | length }}
+          
+          Next Step:
+          Install CNI: ansible-playbook 05-install-cni.yml

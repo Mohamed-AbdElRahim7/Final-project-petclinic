@@ -1,0 +1,175 @@
+---
+# ============================================
+# Complete Kubernetes Cluster Setup
+# Purpose: Run all playbooks in sequence
+# ============================================
+
+- name: "╔═══════════════════════════════════════╗"
+  hosts: localhost
+  gather_facts: no
+  tasks:
+    - name: Display banner
+      debug:
+        msg: |
+          ╔══════════════════════════════════════════════════════╗
+          ║                                                      ║
+          ║     🚀 Kubernetes Cluster Setup - STARTING 🚀       ║
+          ║                                                      ║
+          ║  Cluster: {{ cluster_name }}-{{ environment }}      ║
+          ║  Environment: {{ environment }}                     ║
+          ║                                                      ║
+          ╚══════════════════════════════════════════════════════╝
+
+- name: "=== Step 0: Generate Inventory from Terraform ==="
+  import_playbook: 00-generate-inventory.yml
+
+- name: "=== Step 1: Verify All Nodes ==="
+  import_playbook: 01-verify-nodes.yml
+
+- name: "=== Step 2: Initialize First Master ==="
+  import_playbook: 02-init-first-master.yml
+
+- name: "=== Step 3: Join Other Masters ==="
+  import_playbook: 03-join-masters.yml
+
+- name: "=== Step 4: Join Workers ==="
+  import_playbook: 04-join-workers.yml
+
+- name: "=== Step 5: Install CNI (Calico) ==="
+  import_playbook: 05-install-cni.yml
+
+- name: "=== Step 6: Create Namespaces ==="
+  import_playbook: 06-create-namespaces.yml
+
+- name: "=== Step 7: Setup kubectl on Bastion ==="
+  import_playbook: 07-setup-kubectl-bastion.yml
+
+- name: "=== Step 8: Install Ingress Controller ==="
+  import_playbook: 08-install-ingress-nginx.yml
+  when: install_ingress | default(true) | bool
+
+- name: Final Summary and Health Check
+  hosts: first_master
+  gather_facts: no
+  become: yes
+  tasks:
+    - name: Get all nodes
+      command: kubectl get nodes -o wide
+      register: all_nodes
+
+    - name: Get all pods
+      command: kubectl get pods --all-namespaces -o wide
+      register: all_pods
+
+    - name: Get all services
+      command: kubectl get svc --all-namespaces
+      register: all_services
+
+    - name: Get all namespaces
+      command: kubectl get namespaces
+      register: all_namespaces
+
+    - name: Get cluster info
+      command: kubectl cluster-info
+      register: cluster_info
+
+    - name: Check cluster health
+      command: kubectl get cs
+      register: cluster_health
+      failed_when: false
+
+    - name: Display final summary
+      debug:
+        msg: |
+          ╔══════════════════════════════════════════════════════╗
+          ║                                                      ║
+          ║  ✅ Kubernetes Cluster Setup COMPLETE! 🎉           ║
+          ║                                                      ║
+          ╚══════════════════════════════════════════════════════╝
+          
+          📊 Cluster Information:
+          ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+          • Name: {{ cluster_name }}-{{ environment }}
+          • Version: {{ k8s_version }}
+          • Control Plane: {{ control_plane_endpoint }}
+          
+          📈 Nodes Status:
+          ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+          {{ all_nodes.stdout }}
+          
+          🏷️  Namespaces:
+          ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+          {{ all_namespaces.stdout }}
+          
+          🌐 Networking:
+          ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+          • CNI: Calico {{ calico_version }}
+          • Pod CIDR: {{ pod_network_cidr }}
+          • Service CIDR: {{ service_cidr }}
+          
+          🔌 Services:
+          ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+          {{ all_services.stdout }}
+          
+          🎯 Access Information:
+          ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+          1. SSH to Bastion:
+             ssh -i ~/.ssh/petclinic-test-key.pem ubuntu@{{ hostvars['bastion']['ansible_host'] }}
+          
+          2. Use kubectl from Bastion:
+             kubectl get nodes
+             kubectl get pods --all-namespaces
+          
+          3. Switch namespaces:
+             kubectl config set-context --current --namespace=dev
+             # or use aliases: kdev, ktest, kprod
+          
+          ✅ Next Steps:
+          ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+          1. Deploy your applications:
+             kubectl apply -f app.yaml -n dev
+          
+          2. Expose services via Ingress:
+             kubectl apply -f ingress.yaml
+          
+          3. Monitor cluster:
+             kubectl top nodes
+             kubectl top pods --all-namespaces
+          
+          4. Setup monitoring (optional):
+             ansible-playbook playbooks/09-install-monitoring.yml
+          
+          ╔══════════════════════════════════════════════════════╗
+          ║         🎊 Happy Kuberneting! 🎊                    ║
+          ╚══════════════════════════════════════════════════════╝
+
+    - name: Save cluster info to file
+      copy:
+        content: |
+          # Kubernetes Cluster Information
+          # Generated: {{ ansible_date_time.iso8601 }}
+          
+          Cluster Name: {{ cluster_name }}-{{ environment }}
+          Kubernetes Version: {{ k8s_version }}
+          Control Plane: {{ control_plane_endpoint }}
+          
+          # Nodes
+          {{ all_nodes.stdout }}
+          
+          # Namespaces
+          {{ all_namespaces.stdout }}
+          
+          # Access
+          Bastion IP: {{ hostvars['bastion']['ansible_host'] }}
+          SSH Command: ssh -i ~/.ssh/petclinic-test-key.pem ubuntu@{{ hostvars['bastion']['ansible_host'] }}
+          
+          # Kubeconfig Location
+          /home/ubuntu/.kube/config
+        dest: /tmp/cluster-info.txt
+        mode: '0644'
+
+    - name: Fetch cluster info to local
+      fetch:
+        src: /tmp/cluster-info.txt
+        dest: ./cluster-info-{{ environment }}.txt
+        flat: yes

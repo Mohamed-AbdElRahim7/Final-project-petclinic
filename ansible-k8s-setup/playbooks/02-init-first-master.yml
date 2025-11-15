@@ -1,0 +1,152 @@
+---
+# Playbook 2: تهيئة أول master node
+# الغرض: إنشاء الـ Kubernetes cluster على أول master
+
+- name: Initialize First Master Node
+  hosts: first_master
+  gather_facts: yes
+  become: yes
+  
+  vars:
+    kubeadm_config_file: /tmp/kubeadm-config.yaml
+  
+  tasks:
+    - name: Check if Kubernetes is already initialized
+      stat:
+        path: /etc/kubernetes/admin.conf
+      register: k8s_initialized
+
+    - name: Display initialization status
+      debug:
+        msg: "Kubernetes is {{ 'already initialized' if k8s_initialized.stat.exists else 'NOT initialized' }}"
+
+    - block:
+        - name: Create kubeadm configuration file
+          template:
+            src: ../templates/kubeadm-config.yml.j2
+            dest: "{{ kubeadm_config_file }}"
+            mode: '0644'
+
+        - name: Display kubeadm config
+          command: cat {{ kubeadm_config_file }}
+          register: kubeadm_config_content
+          changed_when: false
+
+        - name: Show kubeadm configuration
+          debug:
+            msg: "{{ kubeadm_config_content.stdout_lines }}"
+
+        - name: Initialize Kubernetes cluster
+          command: >
+            kubeadm init
+            --config {{ kubeadm_config_file }}
+            --upload-certs
+            --v=5
+          register: kubeadm_init_output
+          async: "{{ kubeadm_init_timeout }}"
+          poll: 10
+
+        - name: Display kubeadm init output
+          debug:
+            msg: "{{ kubeadm_init_output.stdout_lines }}"
+
+        - name: Save kubeadm init output
+          copy:
+            content: "{{ kubeadm_init_output.stdout }}"
+            dest: /tmp/kubeadm-init-output.txt
+            mode: '0644'
+
+        - name: Extract join commands
+          shell: |
+            # Extract control-plane join command
+            grep -A 3 "kubeadm join.*--control-plane" /tmp/kubeadm-init-output.txt > /tmp/master-join-command.sh || true
+            
+            # Extract worker join command
+            grep -A 1 "kubeadm join" /tmp/kubeadm-init-output.txt | grep -v "control-plane" | tail -3 > /tmp/worker-join-command.sh || true
+          args:
+            executable: /bin/bash
+
+        - name: Create .kube directory for root
+          file:
+            path: /root/.kube
+            state: directory
+            mode: '0755'
+
+        - name: Copy admin.conf to root's kubeconfig
+          copy:
+            src: /etc/kubernetes/admin.conf
+            dest: /root/.kube/config
+            remote_src: yes
+            mode: '0644'
+
+        - name: Create .kube directory for ubuntu user
+          file:
+            path: /home/ubuntu/.kube
+            state: directory
+            owner: ubuntu
+            group: ubuntu
+            mode: '0755'
+
+        - name: Copy admin.conf to ubuntu user
+          copy:
+            src: /etc/kubernetes/admin.conf
+            dest: /home/ubuntu/.kube/config
+            remote_src: yes
+            owner: ubuntu
+            group: ubuntu
+            mode: '0644'
+
+        - name: Wait for API server to be ready
+          command: kubectl get nodes
+          register: kubectl_get_nodes
+          until: kubectl_get_nodes.rc == 0
+          retries: 30
+          delay: 10
+
+        - name: Display cluster nodes
+          debug:
+            msg: "{{ kubectl_get_nodes.stdout_lines }}"
+
+        - name: Get cluster info
+          command: kubectl cluster-info
+          register: cluster_info
+          changed_when: false
+
+        - name: Display cluster info
+          debug:
+            msg: "{{ cluster_info.stdout_lines }}"
+
+      when: not k8s_initialized.stat.exists
+
+    - name: Fetch admin.conf to local machine
+      fetch:
+        src: /etc/kubernetes/admin.conf
+        dest: /tmp/kubernetes-admin.conf
+        flat: yes
+
+    - name: Fetch join commands to local machine
+      fetch:
+        src: "/tmp/{{ item }}"
+        dest: "/tmp/{{ item }}"
+        flat: yes
+      loop:
+        - master-join-command.sh
+        - worker-join-command.sh
+      ignore_errors: yes
+
+  post_tasks:
+    - name: Summary - First master initialized
+      debug:
+        msg: |
+          ═══════════════════════════════════════════
+          ✅ First Master Initialized Successfully!
+          ═══════════════════════════════════════════
+          Master: {{ ansible_hostname }}
+          Control Plane Endpoint: {{ control_plane_endpoint }}
+          
+          Next Steps:
+          1. Join other masters: ansible-playbook 03-join-masters.yml
+          2. Join workers: ansible-playbook 04-join-workers.yml
+          3. Install CNI: ansible-playbook 05-install-cni.yml
+          
+          Admin kubeconfig saved to: /tmp/kubernetes-admin.conf

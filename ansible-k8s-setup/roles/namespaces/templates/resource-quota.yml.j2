@@ -1,0 +1,17 @@
+---
+# ============================================
+# Resource Quota Template
+# ============================================
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: {{ namespace.name }}-quota
+  namespace: {{ namespace.name }}
+  labels:
+    environment: {{ namespace.labels.environment }}
+    managed-by: ansible
+spec:
+  hard:
+{% for key, value in namespace.resource_quota.items() %}
+    {{ key }}: "{{ value }}"
+{% endfor %}

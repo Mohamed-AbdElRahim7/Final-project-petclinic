@@ -1,0 +1,59 @@
+# ============================================
+# Kubernetes Cluster Inventory
+# Auto-generated on: {{ ansible_date_time.iso8601 }}
+# From Terraform outputs
+# ============================================
+
+[bastion]
+bastion ansible_host={{ bastion_ip }} ansible_user=ubuntu
+
+[masters]
+{% for ip in master_ips %}
+master-{{ loop.index }} ansible_host={{ ip }} node_type=master node_index={{ loop.index }}
+{% endfor %}
+
+[workers]
+{% for ip in worker_ips %}
+worker-{{ loop.index }} ansible_host={{ ip }} node_type=worker node_index={{ loop.index }}
+{% endfor %}
+
+# First master (for cluster init)
+[first_master]
+master-1
+
+# Other masters (for HA)
+[other_masters]
+{% for ip in master_ips[1:] %}
+master-{{ loop.index + 1 }}
+{% endfor %}
+
+# All K8s nodes
+[k8s_cluster:children]
+masters
+workers
+
+# All infrastructure
+[all:children]
+bastion
+k8s_cluster
+
+# ============================================
+# Global Variables
+# ============================================
+[k8s_cluster:vars]
+ansible_user=ubuntu
+ansible_ssh_private_key_file=~/.ssh/petclinic-test-key.pem
+ansible_python_interpreter=/usr/bin/python3
+
+# Proxy through bastion for private nodes
+ansible_ssh_common_args='-o ProxyCommand="ssh -W %h:%p -i ~/.ssh/petclinic-test-key.pem -o StrictHostKeyChecking=no ubuntu@{{ bastion_ip }}"'
+
+[masters:vars]
+k8s_role=master
+
+[workers:vars]
+k8s_role=worker
+
+[bastion:vars]
+# No proxy needed for bastion
+ansible_ssh_common_args='-o StrictHostKeyChecking=no'

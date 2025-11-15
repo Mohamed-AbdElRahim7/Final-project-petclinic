@@ -1,0 +1,47 @@
+---
+# ============================================
+# Variables Specific to Worker Nodes
+# ============================================
+
+# Node Role
+k8s_role: worker
+
+# Node Labels (applied during join)
+node_labels:
+  node-role.kubernetes.io/worker: "worker"
+  workload-type: "application"
+  node-type: "worker"
+
+# No Taints (allow all workloads to run on workers)
+node_taints: []
+
+# Kubelet Configuration
+kubelet_extra_args:
+  max-pods: "110"                                           # Maximum pods per node
+  pods-per-core: "10"                                       # Pods per CPU core
+  kube-reserved: "cpu=200m,memory=512Mi"                    # Resources reserved for Kubernetes components
+  system-reserved: "cpu=200m,memory=512Mi"                  # Resources reserved for system processes
+  eviction-hard: "memory.available<500Mi,nodefs.available<10%"  # Eviction thresholds
+
+# Container Runtime Configuration
+containerd_data_dir: "/var/lib/containerd-data"
+
+# Container Runtime Settings
+containerd_config:
+  max_container_log_size: "10Mi"
+  max_container_log_files: 5
+
+# Resource Configuration
+worker_cpu_reserved: "500m"      # 0.5 CPU core reserved for system
+worker_memory_reserved: "1Gi"     # 1GB RAM reserved for system
+
+# Worker Node Settings
+worker_max_pods: 110
+
+# Auto-scaling Support (for future cluster autoscaler)
+enable_cluster_autoscaler: false
+min_worker_nodes: 3
+max_worker_nodes: 6
+
+# Worker-specific feature gates (if needed)
+worker_feature_gates: {}

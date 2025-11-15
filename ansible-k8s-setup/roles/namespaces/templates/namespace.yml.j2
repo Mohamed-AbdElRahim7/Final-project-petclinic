@@ -1,0 +1,139 @@
+---
+# ============================================
+# Namespace: {{ namespace.name }}
+# Environment: {{ namespace.labels.environment }}
+# ============================================
+
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ namespace.name }}
+  labels:
+{% for key, value in namespace.labels.items() %}
+    {{ key }}: "{{ value }}"
+{% endfor %}
+    created-by: ansible
+    cluster: {{ cluster_name }}
+  annotations:
+    description: "{{ namespace.name | capitalize }} environment for {{ project_name }} application"
+
+---
+# Resource Quota for {{ namespace.name }}
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: {{ namespace.name }}-quota
+  namespace: {{ namespace.name }}
+spec:
+  hard:
+{% for key, value in namespace.resource_quota.items() %}
+    {{ key }}: "{{ value }}"
+{% endfor %}
+
+---
+# LimitRange for {{ namespace.name }}
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: {{ namespace.name }}-limits
+  namespace: {{ namespace.name }}
+spec:
+  limits:
+  # Container limits
+  - type: Container
+    default:
+      cpu: "500m"
+      memory: "512Mi"
+    defaultRequest:
+      cpu: "100m"
+      memory: "128Mi"
+    max:
+      cpu: "2"
+      memory: "4Gi"
+    min:
+      cpu: "50m"
+      memory: "64Mi"
+  
+  # Pod limits
+  - type: Pod
+    max:
+      cpu: "4"
+      memory: "8Gi"
+  
+  # PVC limits
+  - type: PersistentVolumeClaim
+    max:
+      storage: "50Gi"
+    min:
+      storage: "1Gi"
+
+---
+# Network Policy - Default Deny All
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: {{ namespace.name }}
+spec:
+  podSelector: {}
+  policyTypes:
+  - Ingress
+  - Egress
+
+---
+# Network Policy - Allow DNS
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dns
+  namespace: {{ namespace.name }}
+spec:
+  podSelector: {}
+  policyTypes:
+  - Egress
+  egress:
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: kube-system
+    ports:
+    - protocol: UDP
+      port: 53
+
+---
+# Network Policy - Allow Same Namespace
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-same-namespace
+  namespace: {{ namespace.name }}
+spec:
+  podSelector: {}
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  - from:
+    - podSelector: {}
+  egress:
+  - to:
+    - podSelector: {}
+
+---
+# Network Policy - Allow Ingress Controller
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-ingress-controller
+  namespace: {{ namespace.name }}
+spec:
+  podSelector:
+    matchLabels:
+      expose: "true"
+  policyTypes:
+  - Ingress
+  ingress:
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: ingress-nginx

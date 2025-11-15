@@ -1,0 +1,210 @@
+name: 02 - Terraform Apply
+
+# متى يشتغل: عند Push على main (بعد Merge PR)
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'terraform-k8s-infrastructure/**'
+  workflow_dispatch:  # تشغيل يدوي
+
+env:
+  TF_VERSION: '1.6.0'
+  AWS_REGION: 'us-east-1'
+
+jobs:
+  terraform-apply:
+    name: Deploy AWS Infrastructure
+    runs-on: ubuntu-latest
+    
+    permissions:
+      contents: read
+    
+    steps:
+      # ═══════════════════════════════════════
+      # الخطوة 1: تحميل الكود
+      # ═══════════════════════════════════════
+      - name: 📥 Checkout Code
+        uses: actions/checkout@v4
+      
+      # ═══════════════════════════════════════
+      # الخطوة 2: الاتصال بـ AWS
+      # ═══════════════════════════════════════
+      - name: 🔐 Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+      
+      # ═══════════════════════════════════════
+      # الخطوة 3: تنصيب Terraform
+      # ═══════════════════════════════════════
+      - name: 🔧 Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+      
+      # ═══════════════════════════════════════
+      # الخطوة 4: Terraform Init
+      # ═══════════════════════════════════════
+      - name: ⚙️ Terraform Init
+        working-directory: terraform-k8s-infrastructure
+        run: terraform init
+      
+      # ═══════════════════════════════════════
+      # الخطوة 5: Terraform Apply
+      # ═══════════════════════════════════════
+      - name: 🚀 Terraform Apply
+        working-directory: terraform-k8s-infrastructure
+        run: |
+          echo "════════════════════════════════════════"
+          echo "🚀 Starting Terraform Apply..."
+          echo "════════════════════════════════════════"
+          terraform apply -auto-approve -input=false
+          echo ""
+          echo "✅ Terraform Apply Completed!"
+      
+      # ═══════════════════════════════════════
+      # الخطوة 6: الحصول على Terraform Outputs
+      # ═══════════════════════════════════════
+      - name: 📊 Get Terraform Outputs
+        id: outputs
+        working-directory: terraform-k8s-infrastructure
+        run: |
+          echo "════════════════════════════════════════"
+          echo "📊 Extracting Terraform Outputs..."
+          echo "════════════════════════════════════════"
+          
+          BASTION_IP=$(terraform output -raw bastion_public_ip)
+          LB_DNS=$(terraform output -raw master_load_balancer_dns)
+          
+          echo "bastion_ip=${BASTION_IP}" >> $GITHUB_OUTPUT
+          echo "lb_dns=${LB_DNS}" >> $GITHUB_OUTPUT
+          
+          echo ""
+          echo "✅ Outputs Extracted:"
+          echo "   • Bastion IP: ${BASTION_IP}"
+          echo "   • Load Balancer DNS: ${LB_DNS}"
+      
+      # ═══════════════════════════════════════
+      # الخطوة 7: حفظ جميع Outputs للـ Ansible
+      # ═══════════════════════════════════════
+      - name: 📦 Save Terraform Outputs for Ansible
+        working-directory: terraform-k8s-infrastructure
+        run: |
+          echo "════════════════════════════════════════"
+          echo "📦 Saving Terraform Outputs..."
+          echo "════════════════════════════════════════"
+          
+          mkdir -p /tmp/terraform-outputs
+          
+          # Save each output separately
+          terraform output -raw bastion_public_ip > /tmp/terraform-outputs/bastion_ip.txt
+          terraform output -raw master_load_balancer_dns > /tmp/terraform-outputs/lb_dns.txt
+          terraform output -json master_private_ips > /tmp/terraform-outputs/master_ips.json
+          terraform output -json worker_private_ips > /tmp/terraform-outputs/worker_ips.json
+          terraform output -raw ssh_private_key > /tmp/terraform-outputs/petclinic-test-key.pem
+          chmod 400 /tmp/terraform-outputs/petclinic-test-key.pem
+          
+          echo "✅ Outputs saved to /tmp/terraform-outputs/"
+          ls -lh /tmp/terraform-outputs/
+      
+      # ═══════════════════════════════════════
+      # الخطوة 8: رفع Artifacts
+      # ═══════════════════════════════════════
+      - name: 📦 Upload Terraform Outputs as Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: terraform-outputs
+          path: /tmp/terraform-outputs/
+          retention-days: 7
+      
+      # ═══════════════════════════════════════
+      # الخطوة 9: الانتظار لتجهيز EC2
+      # ═══════════════════════════════════════
+      - name: ⏳ Wait for EC2 Instances to Boot
+        run: |
+          echo "════════════════════════════════════════"
+          echo "⏳ Waiting for EC2 instances to boot..."
+          echo "════════════════════════════════════════"
+          echo "This takes approximately 3 minutes..."
+          sleep 180
+          echo "✅ Wait completed!"
+      
+      # ═══════════════════════════════════════
+      # الخطوة 10: اختبار SSH للـ Bastion
+      # ═══════════════════════════════════════
+      - name: 🔌 Test Bastion SSH Connectivity
+        run: |
+          echo "════════════════════════════════════════"
+          echo "🔌 Testing SSH to Bastion..."
+          echo "════════════════════════════════════════"
+          
+          ssh -i /tmp/terraform-outputs/petclinic-test-key.pem \
+              -o StrictHostKeyChecking=no \
+              -o ConnectTimeout=30 \
+              ubuntu@${{ steps.outputs.outputs.bastion_ip }} \
+              'echo "✅ Bastion is reachable!"' || echo "⚠️ Bastion not ready yet"
+      
+      # ═══════════════════════════════════════
+      # الخطوة 11: عرض ملخص البنية التحتية
+      # ═══════════════════════════════════════
+      - name: 📋 Display Infrastructure Summary
+        run: |
+          echo ""
+          echo "╔════════════════════════════════════════════════════╗"
+          echo "║                                                    ║"
+          echo "║  ✅ Infrastructure Deployed Successfully!         ║"
+          echo "║                                                    ║"
+          echo "╚════════════════════════════════════════════════════╝"
+          echo ""
+          echo "📊 Infrastructure Details:"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "• Bastion Public IP:    ${{ steps.outputs.outputs.bastion_ip }}"
+          echo "• Load Balancer DNS:    ${{ steps.outputs.outputs.lb_dns }}"
+          echo "• Masters:              3 nodes"
+          echo "• Workers:              3 nodes"
+          echo ""
+          echo "🔑 SSH Access:"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "ssh -i petclinic-test-key.pem ubuntu@${{ steps.outputs.outputs.bastion_ip }}"
+          echo ""
+          echo "📦 Artifacts:"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "• terraform-outputs (download from Actions tab)"
+          echo "  - bastion_ip.txt"
+          echo "  - lb_dns.txt"
+          echo "  - master_ips.json"
+          echo "  - worker_ips.json"
+          echo "  - petclinic-test-key.pem"
+          echo ""
+          echo "🎯 Next Step:"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "Ansible provisioning will start automatically"
+          echo ""
+      
+      # ═══════════════════════════════════════
+      # الخطوة 12: تشغيل Ansible أوتوماتيك
+      # ═══════════════════════════════════════
+      - name: 🚀 Trigger Ansible Provisioning
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            try {
+              await github.rest.actions.createWorkflowDispatch({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                workflow_id: '03-ansible-provision.yml',
+                ref: 'main'
+              });
+              
+              console.log('✅ Ansible workflow triggered successfully!');
+              console.log('Monitor: https://github.com/${{ github.repository }}/actions');
+            } catch (error) {
+              console.log('⚠️ Failed to trigger Ansible workflow:', error.message);
+              console.log('You can manually trigger it from GitHub Actions tab');
+            }

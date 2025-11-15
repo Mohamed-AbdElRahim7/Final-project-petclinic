@@ -1,0 +1,128 @@
+---
+# ============================================
+# Namespaces Role - Create Namespaces
+# ============================================
+
+- name: Check existing namespaces
+  command: kubectl get namespaces -o json
+  register: existing_namespaces
+  changed_when: false
+
+- name: Parse existing namespaces
+  set_fact:
+    existing_ns_list: "{{ existing_namespaces.stdout | from_json | json_query('items[*].metadata.name') }}"
+
+- name: Display existing namespaces
+  debug:
+    msg: |
+      📋 Existing namespaces:
+      {{ existing_ns_list | join(', ') }}
+
+- name: Create namespace manifests from template
+  template:
+    src: namespace.yml.j2
+    dest: "/tmp/{{ item.name }}-namespace.yml"
+    mode: '0644'
+  loop: "{{ k8s_namespaces }}"
+  loop_control:
+    loop_var: namespace
+  when: item.name not in existing_ns_list
+
+- name: Apply namespace manifests
+  command: kubectl apply -f /tmp/{{ item.name }}-namespace.yml
+  loop: "{{ k8s_namespaces }}"
+  when: item.name not in existing_ns_list
+  register: ns_create
+
+- name: Display namespace creation output
+  debug:
+    msg: "{{ item.stdout_lines }}"
+  loop: "{{ ns_create.results }}"
+  when: item.changed | default(false)
+  loop_control:
+    label: "{{ item.item.name if item.item is defined else 'N/A' }}"
+
+- name: Label kube-system namespace for network policies
+  command: >
+    kubectl label namespace kube-system
+    kubernetes.io/metadata.name=kube-system
+    --overwrite
+  changed_when: false
+
+- name: Create ServiceAccount for each namespace
+  shell: |
+    kubectl create serviceaccount {{ item.name }}-admin \
+      -n {{ item.name }} \
+      --dry-run=client -o yaml | kubectl apply -f -
+  loop: "{{ k8s_namespaces }}"
+  when: item.name not in existing_ns_list
+
+- name: Create Role for namespace admin
+  shell: |
+    cat <<EOF | kubectl apply -f -
+    apiVersion: rbac.authorization.k8s.io/v1
+    kind: Role
+    metadata:
+      name: namespace-admin
+      namespace: {{ item.name }}
+    rules:
+    - apiGroups: ["*"]
+      resources: ["*"]
+      verbs: ["*"]
+    EOF
+  loop: "{{ k8s_namespaces }}"
+  when: item.name not in existing_ns_list
+
+- name: Create RoleBinding
+  shell: |
+    kubectl create rolebinding {{ item.name }}-admin-binding \
+      --role=namespace-admin \
+      --serviceaccount={{ item.name }}:{{ item.name }}-admin \
+      -n {{ item.name }} \
+      --dry-run=client -o yaml | kubectl apply -f -
+  loop: "{{ k8s_namespaces }}"
+  when: item.name not in existing_ns_list
+
+- name: Get all namespaces with labels
+  command: kubectl get namespaces --show-labels
+  register: all_namespaces
+  changed_when: false
+
+- name: Display all namespaces
+  debug:
+    msg: "{{ all_namespaces.stdout_lines }}"
+
+- name: Get resource quotas
+  command: kubectl get quota --all-namespaces
+  register: quotas
+  changed_when: false
+
+- name: Display quotas
+  debug:
+    msg: "{{ quotas.stdout_lines }}"
+
+- name: Get network policies
+  command: kubectl get networkpolicy --all-namespaces
+  register: netpol
+  changed_when: false
+
+- name: Display network policies
+  debug:
+    msg: "{{ netpol.stdout_lines }}"
+
+- name: Display namespaces summary
+  debug:
+    msg: |
+      ╔═══════════════════════════════════════════════════════╗
+      ║  ✅ Namespaces Created Successfully!                 ║
+      ╚═══════════════════════════════════════════════════════╝
+      
+      📊 Created Namespaces:
+      {% for ns in k8s_namespaces %}
+      • {{ ns.name }} ({{ ns.labels.environment }})
+      {% endfor %}
+      
+      🔒 Security:
+      • Resource Quotas: Applied
+      • Network Policies: Applied
+      • RBAC: Configured

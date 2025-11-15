@@ -1,0 +1,125 @@
+---
+# ============================================
+# K8s Join Role - Join Nodes to Cluster
+# ============================================
+
+- name: Check if node is already joined
+  stat:
+    path: /etc/kubernetes/kubelet.conf
+  register: node_joined
+
+- name: Display join status
+  debug:
+    msg: "Node {{ ansible_hostname }} is {{ 'already joined' if node_joined.stat.exists else 'NOT joined' }}"
+
+- name: Join node to cluster
+  block:
+    - name: Get join token from first master
+      shell: kubeadm token create --print-join-command
+      delegate_to: "{{ groups['first_master'][0] }}"
+      register: join_command
+      run_once: yes
+      changed_when: false
+
+    - name: Display join command
+      debug:
+        msg: "{{ join_command.stdout }}"
+
+    - name: Get certificate key for control plane (Masters only)
+      shell: kubeadm init phase upload-certs --upload-certs 2>/dev/null | tail -1
+      delegate_to: "{{ groups['first_master'][0] }}"
+      register: certificate_key
+      run_once: yes
+      changed_when: false
+      when: k8s_role == "master"
+
+    - name: Join as master node (Control Plane)
+      shell: |
+        {{ join_command.stdout }} \
+        --control-plane \
+        --certificate-key {{ certificate_key.stdout }} \
+        --apiserver-advertise-address {{ ansible_default_ipv4.address }}
+      register: join_output
+      async: "{{ kubeadm_join_timeout }}"
+      poll: 10
+      when: k8s_role == "master"
+
+    - name: Join as worker node
+      shell: "{{ join_command.stdout }}"
+      register: join_output
+      async: "{{ kubeadm_join_timeout }}"
+      poll: 10
+      when: k8s_role == "worker"
+
+    - name: Display join output
+      debug:
+        msg: "{{ join_output.stdout_lines }}"
+
+    - name: Setup kubeconfig for masters
+      block:
+        - name: Create .kube directory for root
+          file:
+            path: /root/.kube
+            state: directory
+            mode: '0755'
+
+        - name: Copy admin.conf to root
+          copy:
+            src: /etc/kubernetes/admin.conf
+            dest: /root/.kube/config
+            remote_src: yes
+            mode: '0644'
+
+        - name: Create .kube directory for ubuntu
+          file:
+            path: /home/ubuntu/.kube
+            state: directory
+            owner: ubuntu
+            group: ubuntu
+            mode: '0755'
+
+        - name: Copy admin.conf to ubuntu
+          copy:
+            src: /etc/kubernetes/admin.conf
+            dest: /home/ubuntu/.kube/config
+            remote_src: yes
+            owner: ubuntu
+            group: ubuntu
+            mode: '0644'
+      when: k8s_role == "master"
+
+    - name: Wait for node to appear in cluster
+      command: kubectl get node {{ ansible_hostname }}
+      register: node_status
+      until: "'Ready' in node_status.stdout or 'NotReady' in node_status.stdout"
+      retries: 30
+      delay: 10
+      delegate_to: "{{ groups['first_master'][0] }}"
+      changed_when: false
+
+    - name: Display node status
+      debug:
+        msg: "{{ node_status.stdout_lines }}"
+
+  when: not node_joined.stat.exists
+
+- name: Label worker nodes
+  command: >
+    kubectl label node {{ ansible_hostname }}
+    node-role.kubernetes.io/worker=worker
+    --overwrite
+  delegate_to: "{{ groups['first_master'][0] }}"
+  when: 
+    - k8s_role == "worker"
+    - not node_joined.stat.exists
+  changed_when: true
+
+- name: Display join summary
+  debug:
+    msg: |
+      ╔═══════════════════════════════════════════════════════╗
+      ║  ✅ Node {{ ansible_hostname }} Joined Successfully! ║
+      ╚═══════════════════════════════════════════════════════╝
+      
+      Role: {{ k8s_role }}
+      IP: {{ ansible_default_ipv4.address }}

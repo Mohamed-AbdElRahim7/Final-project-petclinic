@@ -1,0 +1,139 @@
+---
+# ============================================
+# Kubeadm Configuration for HA Cluster
+# ============================================
+
+apiVersion: kubeadm.k8s.io/v1beta3
+kind: InitConfiguration
+bootstrapTokens:
+- groups:
+  - system:bootstrappers:kubeadm:default-node-token
+  token: {{ lookup('password', '/tmp/kubeadm_token chars=ascii_letters,digits length=6') }}.{{ lookup('password', '/tmp/kubeadm_token_suffix chars=ascii_letters,digits length=16') }}
+  ttl: 24h0m0s
+  usages:
+  - signing
+  - authentication
+localAPIEndpoint:
+  advertiseAddress: {{ ansible_default_ipv4.address }}
+  bindPort: {{ api_server_port }}
+nodeRegistration:
+  criSocket: unix:///var/run/containerd/containerd.sock
+  imagePullPolicy: IfNotPresent
+  name: {{ ansible_hostname }}
+  taints:
+  - effect: NoSchedule
+    key: node-role.kubernetes.io/control-plane
+
+---
+apiVersion: kubeadm.k8s.io/v1beta3
+kind: ClusterConfiguration
+kubernetesVersion: v{{ k8s_version }}.0
+clusterName: {{ cluster_name }}-{{ environment }}
+controlPlaneEndpoint: "{{ control_plane_endpoint }}"
+certificatesDir: {{ k8s_pki_dir }}
+imageRepository: registry.k8s.io
+
+# Networking
+networking:
+  dnsDomain: {{ dns_domain }}
+  podSubnet: {{ pod_network_cidr }}
+  serviceSubnet: {{ service_cidr }}
+
+# API Server Configuration
+apiServer:
+  timeoutForControlPlane: 4m0s
+  certSANs:
+  - "{{ control_plane_endpoint.split(':')[0] }}"
+  - "{{ ansible_default_ipv4.address }}"
+  - "{{ ansible_hostname }}"
+  - "localhost"
+  - "127.0.0.1"
+  extraArgs:
+    enable-admission-plugins: NodeRestriction
+    audit-log-path: /var/log/kubernetes/audit.log
+    audit-log-maxage: "7"
+    audit-log-maxbackup: "10"
+    audit-log-maxsize: "100"
+    service-node-port-range: 30000-32767
+    authorization-mode: Node,RBAC
+  extraVolumes:
+  - name: audit-log
+    hostPath: /var/log/kubernetes
+    mountPath: /var/log/kubernetes
+    readOnly: false
+    pathType: DirectoryOrCreate
+
+# Controller Manager Configuration
+controllerManager:
+  extraArgs:
+    bind-address: 0.0.0.0
+    node-monitor-grace-period: 40s
+    pod-eviction-timeout: 30s
+    cluster-signing-duration: 87600h
+
+# Scheduler Configuration
+scheduler:
+  extraArgs:
+    bind-address: 0.0.0.0
+
+# etcd Configuration
+etcd:
+  local:
+    dataDir: {{ etcd_data_dir }}
+    extraArgs:
+      listen-metrics-urls: http://0.0.0.0:2381
+    serverCertSANs:
+    - "{{ ansible_hostname }}"
+    - "{{ ansible_default_ipv4.address }}"
+    peerCertSANs:
+    - "{{ ansible_hostname }}"
+    - "{{ ansible_default_ipv4.address }}"
+
+---
+apiVersion: kubelet.config.k8s.io/v1beta1
+kind: KubeletConfiguration
+cgroupDriver: systemd
+failSwapOn: true
+authentication:
+  anonymous:
+    enabled: false
+  webhook:
+    cacheTTL: 2m0s
+    enabled: true
+  x509:
+    clientCAFile: /etc/kubernetes/pki/ca.crt
+authorization:
+  mode: Webhook
+  webhook:
+    cacheAuthorizedTTL: 5m0s
+    cacheUnauthorizedTTL: 30s
+clusterDNS:
+- {{ service_cidr.split('.')[0] }}.{{ service_cidr.split('.')[1] }}.0.10
+clusterDomain: {{ dns_domain }}
+containerLogMaxFiles: 5
+containerLogMaxSize: 10Mi
+cpuManagerReconcilePeriod: 10s
+enableServer: true
+evictionHard:
+  imagefs.available: 15%
+  memory.available: 100Mi
+  nodefs.available: 10%
+  nodefs.inodesFree: 5%
+maxPods: 110
+podPidsLimit: 4096
+readOnlyPort: 0
+resolvConf: /etc/resolv.conf
+rotateCertificates: true
+runtimeRequestTimeout: 15m
+shutdownGracePeriod: 30s
+shutdownGracePeriodCriticalPods: 10s
+streamingConnectionIdleTimeout: 4h
+syncFrequency: 1m
+
+---
+apiVersion: kubeproxy.config.k8s.io/v1alpha1
+kind: KubeProxyConfiguration
+bindAddress: 0.0.0.0
+mode: iptables
+clusterCIDR: {{ pod_network_cidr }}
+metricsBindAddress: 0.0.0.0:10249

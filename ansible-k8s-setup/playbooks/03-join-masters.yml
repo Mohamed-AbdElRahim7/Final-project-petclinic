@@ -1,0 +1,118 @@
+---
+# Playbook 3: إضافة باقي الـ masters للـ cluster
+# الغرض: join master-2 و master-3 كـ control plane nodes
+
+- name: Join Other Masters to Cluster
+  hosts: other_masters
+  gather_facts: yes
+  become: yes
+  serial: 1  # انضمام واحد تلو الآخر
+  
+  tasks:
+    - name: Check if node is already joined
+      stat:
+        path: /etc/kubernetes/kubelet.conf
+      register: node_joined
+
+    - name: Display join status
+      debug:
+        msg: "Node {{ ansible_hostname }} is {{ 'already joined' if node_joined.stat.exists else 'NOT joined' }}"
+
+    - block:
+        - name: Get certificate key from first master
+          shell: |
+            kubeadm init phase upload-certs --upload-certs 2>/dev/null | tail -1
+          delegate_to: "{{ groups['first_master'][0] }}"
+          register: certificate_key
+          run_once: yes
+
+        - name: Get join token from first master
+          shell: |
+            kubeadm token create --print-join-command
+          delegate_to: "{{ groups['first_master'][0] }}"
+          register: join_command
+          run_once: yes
+
+        - name: Display join command
+          debug:
+            msg: "{{ join_command.stdout }}"
+
+        - name: Join master to cluster
+          shell: |
+            {{ join_command.stdout }} \
+            --control-plane \
+            --certificate-key {{ certificate_key.stdout }} \
+            --apiserver-advertise-address {{ ansible_default_ipv4.address }}
+          register: join_output
+          async: "{{ kubeadm_join_timeout }}"
+          poll: 10
+
+        - name: Display join output
+          debug:
+            msg: "{{ join_output.stdout_lines }}"
+
+        - name: Create .kube directory for root
+          file:
+            path: /root/.kube
+            state: directory
+            mode: '0755'
+
+        - name: Copy admin.conf to root's kubeconfig
+          copy:
+            src: /etc/kubernetes/admin.conf
+            dest: /root/.kube/config
+            remote_src: yes
+            mode: '0644'
+
+        - name: Create .kube directory for ubuntu user
+          file:
+            path: /home/ubuntu/.kube
+            state: directory
+            owner: ubuntu
+            group: ubuntu
+            mode: '0755'
+
+        - name: Copy admin.conf to ubuntu user
+          copy:
+            src: /etc/kubernetes/admin.conf
+            dest: /home/ubuntu/.kube/config
+            remote_src: yes
+            owner: ubuntu
+            group: ubuntu
+            mode: '0644'
+
+        - name: Wait for node to be ready
+          command: kubectl get node {{ ansible_hostname }}
+          register: node_status
+          until: "'Ready' in node_status.stdout or 'NotReady' in node_status.stdout"
+          retries: 30
+          delay: 10
+          delegate_to: "{{ groups['first_master'][0] }}"
+
+        - name: Display node status
+          debug:
+            msg: "{{ node_status.stdout_lines }}"
+
+      when: not node_joined.stat.exists
+
+    - name: Verify master node in cluster
+      command: kubectl get nodes
+      register: all_nodes
+      delegate_to: "{{ groups['first_master'][0] }}"
+      run_once: yes
+
+    - name: Display all nodes
+      debug:
+        msg: "{{ all_nodes.stdout_lines }}"
+      run_once: yes
+
+  post_tasks:
+    - name: Summary - Masters joined
+      debug:
+        msg: |
+          ═══════════════════════════════════════════
+          ✅ Master {{ ansible_hostname }} Joined Successfully!
+          ═══════════════════════════════════════════
+          
+          Next Step:
+          Join workers: ansible-playbook 04-join-workers.yml

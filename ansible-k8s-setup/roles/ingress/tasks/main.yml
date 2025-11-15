@@ -1,0 +1,125 @@
+---
+# ============================================
+# Ingress Role - Install NGINX Ingress
+# ============================================
+
+- name: Check if Ingress namespace exists
+  command: kubectl get namespace ingress-nginx
+  register: ingress_ns_check
+  failed_when: false
+  changed_when: false
+
+- name: Display Ingress status
+  debug:
+    msg: "Ingress is {{ 'already installed' if ingress_ns_check.rc == 0 else 'NOT installed' }}"
+
+- name: Install NGINX Ingress Controller
+  block:
+    - name: Create ingress-nginx namespace
+      command: kubectl create namespace ingress-nginx --dry-run=client -o yaml | kubectl apply -f -
+      register: ns_create
+
+    - name: Download NGINX Ingress manifest
+      get_url:
+        url: "https://raw.githubusercontent.com/kubernetes/ingress-nginx/controller-{{ ingress_version }}/deploy/static/provider/aws/deploy.yaml"
+        dest: /tmp/ingress-nginx.yaml
+        mode: '0644'
+        timeout: 60
+
+    - name: Display manifest info
+      shell: wc -l /tmp/ingress-nginx.yaml
+      register: manifest_lines
+      changed_when: false
+
+    - name: Show manifest size
+      debug:
+        msg: "Downloaded Ingress manifest: {{ manifest_lines.stdout }} lines"
+
+    - name: Apply NGINX Ingress manifest
+      command: kubectl apply -f /tmp/ingress-nginx.yaml
+      register: ingress_apply
+
+    - name: Display apply output
+      debug:
+        msg: "{{ ingress_apply.stdout_lines }}"
+
+    - name: Wait for Ingress Controller deployment
+      command: >
+        kubectl wait --namespace ingress-nginx
+        --for=condition=ready pod
+        --selector=app.kubernetes.io/component=controller
+        --timeout={{ pod_ready_timeout }}s
+      register: ingress_ready
+      retries: 3
+      delay: 10
+
+    - name: Display readiness status
+      debug:
+        msg: "{{ ingress_ready.stdout_lines }}"
+
+  when: ingress_ns_check.rc != 0
+
+- name: Get Ingress Controller pods
+  command: kubectl get pods -n ingress-nginx -o wide
+  register: ingress_pods
+  changed_when: false
+
+- name: Display Ingress pods
+  debug:
+    msg: "{{ ingress_pods.stdout_lines }}"
+
+- name: Get Ingress Service details
+  command: kubectl get svc -n ingress-nginx
+  register: ingress_svc
+  changed_when: false
+
+- name: Display Ingress service
+  debug:
+    msg: "{{ ingress_svc.stdout_lines }}"
+
+- name: Get LoadBalancer endpoint
+  shell: |
+    kubectl get svc ingress-nginx-controller -n ingress-nginx \
+    -o jsonpath='{.status.loadBalancer.ingress[0].hostname}'
+  register: lb_endpoint
+  until: lb_endpoint.stdout != ""
+  retries: 10
+  delay: 30
+  failed_when: false
+  changed_when: false
+
+- name: Display LoadBalancer endpoint
+  debug:
+    msg: |
+      {% if lb_endpoint.stdout %}
+      ✅ Ingress LoadBalancer: {{ lb_endpoint.stdout }}
+      {% else %}
+      ⚠️  LoadBalancer endpoint not ready yet. Check AWS console.
+      {% endif %}
+
+- name: Verify IngressClass
+  command: kubectl get ingressclass
+  register: ingress_class
+  changed_when: false
+
+- name: Display IngressClass
+  debug:
+    msg: "{{ ingress_class.stdout_lines }}"
+
+- name: Display Ingress summary
+  debug:
+    msg: |
+      ╔═══════════════════════════════════════════════════════╗
+      ║  ✅ NGINX Ingress Controller Installed!              ║
+      ╚═══════════════════════════════════════════════════════╝
+      
+      📊 Configuration:
+      • Namespace: ingress-nginx
+      • IngressClass: nginx
+      • LoadBalancer Type: AWS NLB
+      {% if lb_endpoint.stdout %}
+      • Endpoint: {{ lb_endpoint.stdout }}
+      {% endif %}
+      
+      🎯 Usage Example:
+      Create an Ingress resource to expose your services

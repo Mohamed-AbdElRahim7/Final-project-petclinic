@@ -1,0 +1,20 @@
+---
+# ============================================
+# Ansible Galaxy Collections & Roles
+# ============================================
+
+collections:
+  - name: community.general
+    version: "7.5.0"
+  
+  - name: ansible.posix
+    version: "1.5.4"
+  
+  - name: community.kubernetes
+    version: "3.0.0"
+  
+  - name: kubernetes.core
+    version: "2.4.0"
+
+roles: []
+  # No external roles needed - using custom roles

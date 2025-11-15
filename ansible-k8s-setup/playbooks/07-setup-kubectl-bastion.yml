@@ -1,0 +1,79 @@
+---
+# Playbook 7: إعداد kubectl على الـ bastion
+# الغرض: نسخ kubeconfig من master إلى bastion
+
+- name: Setup kubectl on Bastion
+  hosts: localhost
+  gather_facts: no
+  connection: local
+  
+  vars:
+    bastion_ip: "{{ lookup('env', 'BASTION_IP') | default('BASTION_IP_HERE', true) }}"
+    first_master_ip: "{{ groups['first_master'][0] }}"
+  
+  tasks:
+    - name: Display bastion IP
+      debug:
+        msg: "Configuring kubectl on bastion: {{ bastion_ip }}"
+
+    - name: Fetch kubeconfig from first master
+      fetch:
+        src: /home/ubuntu/.kube/config
+        dest: /tmp/kubeconfig-from-master
+        flat: yes
+      delegate_to: "{{ first_master_ip }}"
+
+    - name: Create .kube directory on bastion
+      file:
+        path: /home/ubuntu/.kube
+        state: directory
+        owner: ubuntu
+        group: ubuntu
+        mode: '0755'
+      delegate_to: "{{ bastion_ip }}"
+      become: yes
+
+    - name: Copy kubeconfig to bastion
+      copy:
+        src: /tmp/kubeconfig-from-master
+        dest: /home/ubuntu/.kube/config
+        owner: ubuntu
+        group: ubuntu
+        mode: '0600'
+      delegate_to: "{{ bastion_ip }}"
+      become: yes
+
+    - name: Test kubectl on bastion
+      command: kubectl get nodes
+      delegate_to: "{{ bastion_ip }}"
+      become: yes
+      become_user: ubuntu
+      register: kubectl_test
+
+    - name: Display kubectl test result
+      debug:
+        msg: "{{ kubectl_test.stdout_lines }}"
+
+  post_tasks:
+    - name: Summary - kubectl configured on bastion
+      debug:
+        msg: |
+          ═══════════════════════════════════════════
+          ✅ kubectl Configured on Bastion!
+          ═══════════════════════════════════════════
+          
+          You can now SSH to bastion and use kubectl:
+          
+          ssh -i petclinic-test-key.pem ubuntu@{{ bastion_ip }}
+          kubectl get nodes
+          kubectl get pods --all-namespaces
+          
+          Available namespaces:
+          - dev
+          - test
+          - prod
+          
+          Quick commands:
+          kdev   # Switch to dev namespace
+          ktest  # Switch to test namespace
+          kprod  # Switch to prod namespace
