@@ -84,7 +84,7 @@ jobs:
         if: steps.download_artifacts.outcome == 'failure'
         run: |
           echo "════════════════════════════════════════"
-          echo "❌ ERROR: Terraform outputs not found!"
+          echo "❌❌ ERROR: Terraform outputs not found!"
           echo "════════════════════════════════════════"
           echo ""
           echo "This means one of the following:"
@@ -403,3 +403,4 @@ EOF
           echo "2. export KUBECONFIG=./kubeconfig"
           echo "3. kubectl get nodes"
           echo ""
+
