@@ -63,10 +63,10 @@ jobs:
           echo "lb_dns=$(terraform output -raw master_load_balancer_dns)" >> $GITHUB_OUTPUT
 
       - name: 🚀 Trigger Ansible Provision
-        uses: actions/workflow-dispatch@v2
+        uses: peter-evans/workflow-dispatch@v2
         with:
           workflow: "03-ansible-provision.yml"
-          ref: main
+          ref: "main"
           inputs:
             bastion_ip: ${{ steps.extract.outputs.bastion_ip }}
             lb_dns: ${{ steps.extract.outputs.lb_dns }}
