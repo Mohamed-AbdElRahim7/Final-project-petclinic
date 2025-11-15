@@ -45,7 +45,7 @@ jobs:
           echo "========================================"
           
           pip install --upgrade pip setuptools wheel
-          pip install ansible-core>=2.15.0
+          pip install ansible-core
           
           echo ""
           echo "Ansible installed:"
