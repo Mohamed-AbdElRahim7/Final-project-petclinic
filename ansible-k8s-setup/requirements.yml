@@ -1,20 +1,25 @@
 ---
 # ============================================
 # Ansible Galaxy Collections & Roles
+# Updated: Compatible versions for Python 3.11
 # ============================================
 
 collections:
+  # Community General Collection
   - name: community.general
-    version: "7.5.0"
+    version: ">=8.0.0"
   
+  # POSIX utilities
   - name: ansible.posix
-    version: "1.5.4"
+    version: ">=1.5.0"
   
+  # Kubernetes Collection (Updated to latest compatible version)
   - name: community.kubernetes
-    version: "3.0.0"
+    version: ">=3.0.0"
   
+  # Kubernetes Core (Updated to latest compatible version)
   - name: kubernetes.core
-    version: "2.4.0"
+    version: ">=3.0.0"
 
 roles: []
   # No external roles needed - using custom roles
