@@ -29,7 +29,7 @@ apiVersion: kubeadm.k8s.io/v1beta3
 kind: ClusterConfiguration
 kubernetesVersion: v{{ k8s_version }}.0
 clusterName: {{ cluster_name }}-{{ environment }}
-controlPlaneEndpoint: "{{ control_plane_endpoint }}"
+controlPlaneEndpoint: "{{ ansible_default_ipv4.address }}:6443"
 certificatesDir: {{ k8s_pki_dir }}
 imageRepository: registry.k8s.io
 
@@ -138,3 +138,4 @@ mode: iptables
 clusterCIDR: {{ pod_network_cidr }}
 
 metricsBindAddress: 0.0.0.0:10249
+
