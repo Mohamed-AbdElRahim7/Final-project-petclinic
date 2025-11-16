@@ -21,20 +21,43 @@
       ansible.builtin.meta: end_host
       when: "'joined' in node_status.stdout"
 
-    - name: Generate new join token on first master
+    - name: Create new bootstrap token
       ansible.builtin.shell: |
-        kubeadm token create --print-join-command
-      register: join_command
+        kubeadm token create --ttl 30m
+      register: new_token
       changed_when: false
       delegate_to: "{{ groups['first_master'][0] }}"
 
+    - name: Get CA cert hash
+      ansible.builtin.shell: |
+        openssl x509 -pubkey -in /etc/kubernetes/pki/ca.crt | \
+        openssl rsa -pubin -outform der 2>/dev/null | \
+        openssl dgst -sha256 -hex | sed 's/^.* //'
+      register: ca_cert_hash
+      changed_when: false
+      delegate_to: "{{ groups['first_master'][0] }}"
+
+    - name: Get control plane endpoint from kubeadm config
+      ansible.builtin.shell: |
+        kubectl --kubeconfig=/etc/kubernetes/admin.conf -n kube-system get configmap kubeadm-config -o jsonpath='{.data.ClusterConfiguration}' | grep controlPlaneEndpoint | awk '{print $2}'
+      register: control_plane_endpoint
+      changed_when: false
+      delegate_to: "{{ groups['first_master'][0] }}"
+
+    - name: Build worker join command with LB endpoint
+      ansible.builtin.set_fact:
+        worker_join_command: >-
+          kubeadm join {{ control_plane_endpoint.stdout }}
+          --token {{ new_token.stdout }}
+          --discovery-token-ca-cert-hash sha256:{{ ca_cert_hash.stdout }}
+
     - name: Display join command
       ansible.builtin.debug:
-        msg: "{{ join_command.stdout }}"
+        msg: "{{ worker_join_command }}"
 
     - name: Join worker to cluster
       ansible.builtin.shell: |
-        {{ join_command.stdout }}
+        {{ worker_join_command }}
       register: join_result
       async: 600
       poll: 10
@@ -42,6 +65,14 @@
       delay: 10
       until: join_result.rc == 0
       changed_when: true
+
+    - name: Wait for kubelet to start
+      ansible.builtin.systemd:
+        name: kubelet
+        state: started
+        enabled: true
+      retries: 5
+      delay: 10
 
     - name: Wait for node to be ready
       ansible.builtin.shell: |
@@ -68,3 +99,11 @@
     - name: Display verification
       ansible.builtin.debug:
         msg: "{{ verify_join.stdout_lines }}"
+
+- name: Wait before next worker
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Pause between workers
+      ansible.builtin.pause:
+        seconds: 20
