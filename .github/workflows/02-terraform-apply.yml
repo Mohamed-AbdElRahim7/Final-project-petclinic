@@ -19,9 +19,13 @@ jobs:
     runs-on: ubuntu-latest
 
     permissions:
-      id-token: write
       contents: read
+      id-token: write
       actions: write
+
+    outputs:
+      bastion_ip: ${{ steps.extract.outputs.bastion_ip }}
+      lb_dns: ${{ steps.extract.outputs.lb_dns }}
 
     steps:
       - name: 📥 Checkout Code
@@ -76,8 +80,143 @@ jobs:
           path: /tmp/terraform-outputs/
           retention-days: 7
 
-      - name: 🚀 Trigger Ansible Workflow
-        uses: peter-evans/workflow-dispatch@v2
+  ansible-provision:
+    name: Ansible – Configure Kubernetes Cluster
+    runs-on: ubuntu-latest
+    needs: terraform-apply
+
+    env:
+      AWS_REGION: ${{ env.AWS_REGION }}
+      ANSIBLE_HOST_KEY_CHECKING: "False"
+
+    steps:
+      - name: 📥 Checkout Code
+        uses: actions/checkout@v4
+
+      - name: 🐍 Setup Python
+        uses: actions/setup-python@v5
         with:
-          workflow: "03-ansible-provision.yml"
-          ref: "main"
+          python-version: '3.11'
+
+      - name: 📦 Install Ansible
+        run: |
+          pip install --upgrade pip setuptools wheel
+          pip install ansible-core
+
+      - name: 🔐 Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: 📥 Download Terraform Outputs
+        uses: actions/download-artifact@v4
+        with:
+          name: terraform-outputs
+          path: /tmp/terraform-outputs
+
+      - name: 🔑 Setup SSH Key
+        run: |
+          mkdir -p ~/.ssh
+          cp /tmp/terraform-outputs/petclinic-test-key.pem ~/.ssh/
+          chmod 400 ~/.ssh/petclinic-test-key.pem
+          cat >> ~/.ssh/config <<EOF
+          Host *
+              StrictHostKeyChecking no
+              UserKnownHostsFile=/dev/null
+          EOF
+          chmod 600 ~/.ssh/config
+
+      - name: 📝 Generate Inventory
+        working-directory: ansible-k8s-setup
+        run: |
+          BASTION_IP=$(cat /tmp/terraform-outputs/bastion_ip.txt)
+          LB_DNS=$(cat /tmp/terraform-outputs/lb_dns.txt)
+          MASTER_IPS=$(jq -r '.[]' /tmp/terraform-outputs/master_ips.json | paste -sd ' ')
+          WORKER_IPS=$(jq -r '.[]' /tmp/terraform-outputs/worker_ips.json | paste -sd ' ')
+
+          echo "[bastion]" > inventory/hosts.ini
+          echo "bastion ansible_host=$BASTION_IP ansible_user=ubuntu" >> inventory/hosts.ini
+          echo "" >> inventory/hosts.ini
+          echo "[masters]" >> inventory/hosts.ini
+          IDX=1
+          for IP in $MASTER_IPS; do
+            echo "master-$IDX ansible_host=$IP node_type=master node_index=$IDX" >> inventory/hosts.ini
+            IDX=$((IDX+1))
+          done
+          echo "" >> inventory/hosts.ini
+          echo "[workers]" >> inventory/hosts.ini
+          IDX=1
+          for IP in $WORKER_IPS; do
+            echo "worker-$IDX ansible_host=$IP node_type=worker node_index=$IDX" >> inventory/hosts.ini
+            IDX=$((IDX+1))
+          done
+          cat >> inventory/hosts.ini <<EOF
+
+          [first_master]
+          master-1
+
+          [other_masters]
+          master-2
+          master-3
+
+          [k8s_cluster:children]
+          masters
+          workers
+
+          [all:children]
+          bastion
+          k8s_cluster
+
+          [k8s_cluster:vars]
+          ansible_user=ubuntu
+          ansible_ssh_private_key_file=~/.ssh/petclinic-test-key.pem
+          ansible_python_interpreter=/usr/bin/python3
+          ansible_ssh_common_args='-o ProxyCommand="ssh -W %h:%p -i ~/.ssh/petclinic-test-key.pem -o StrictHostKeyChecking=no ubuntu@$BASTION_IP"'
+
+          [masters:vars]
+          k8s_role=master
+
+          [workers:vars]
+          k8s_role=worker
+          EOF
+
+          sed -i "s|control_plane_endpoint:.*|control_plane_endpoint: \"$LB_DNS:6443\"|" inventory/group_vars/all.yml
+
+      - name: 🔌 Test Connectivity
+        working-directory: ansible-k8s-setup
+        run: ansible all -i inventory/hosts.ini -m ping || echo "Some nodes not ready yet"
+
+      - name: "✅ Step 1: Verify Nodes"
+        working-directory: ansible-k8s-setup
+        run: ansible-playbook playbooks/01-verify-nodes.yml -i inventory/hosts.ini
+
+      - name: "🎯 Step 2: Init First Master"
+        working-directory: ansible-k8s-setup
+        run: ansible-playbook playbooks/02-init-first-master.yml -i inventory/hosts.ini
+
+      - name: "🔗 Step 3: Join Masters"
+        working-directory: ansible-k8s-setup
+        run: ansible-playbook playbooks/03-join-masters.yml -i inventory/hosts.ini
+
+      - name: "👷 Step 4: Join Workers"
+        working-directory: ansible-k8s-setup
+        run: ansible-playbook playbooks/04-join-workers.yml -i inventory/hosts.ini
+
+      - name: "🌐 Step 5: Install CNI"
+        working-directory: ansible-k8s-setup
+        run: ansible-playbook playbooks/05-install-cni.yml -i inventory/hosts.ini
+
+      - name: "📦 Step 6: Create Namespaces"
+        working-directory: ansible-k8s-setup
+        run: ansible-playbook playbooks/06-create-namespaces.yml -i inventory/hosts.ini
+
+      - name: "🖥️ Step 7: Setup Kubectl"
+        working-directory: ansible-k8s-setup
+        run: ansible-playbook playbooks/07-setup-kubectl-bastion.yml -i inventory/hosts.ini
+
+      - name: "🔀 Step 8: Install Ingress"
+        working-directory: ansible-k8s-setup
+        run: ansible-playbook playbooks/08-install-ingress-nginx.yml -i inventory/hosts.ini
