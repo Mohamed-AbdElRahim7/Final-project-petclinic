@@ -29,10 +29,10 @@
       changed_when: false
       delegate_to: "{{ groups['first_master'][0] }}"
 
-    - name: Generate new join token on first master
+    - name: Create new bootstrap token
       ansible.builtin.shell: |
-        kubeadm token create --print-join-command
-      register: join_token_output
+        kubeadm token create --ttl 30m
+      register: new_token
       changed_when: false
       delegate_to: "{{ groups['first_master'][0] }}"
 
@@ -45,10 +45,19 @@
       changed_when: false
       delegate_to: "{{ groups['first_master'][0] }}"
 
-    - name: Build complete join command
+    - name: Get control plane endpoint from kubeadm config
+      ansible.builtin.shell: |
+        kubectl --kubeconfig=/etc/kubernetes/admin.conf -n kube-system get configmap kubeadm-config -o jsonpath='{.data.ClusterConfiguration}' | grep controlPlaneEndpoint | awk '{print $2}'
+      register: control_plane_endpoint
+      changed_when: false
+      delegate_to: "{{ groups['first_master'][0] }}"
+
+    - name: Build complete join command with LB endpoint
       ansible.builtin.set_fact:
         master_join_command: >-
-          {{ join_token_output.stdout }}
+          kubeadm join {{ control_plane_endpoint.stdout }}
+          --token {{ new_token.stdout }}
+          --discovery-token-ca-cert-hash sha256:{{ ca_cert_hash.stdout }}
           --control-plane
           --certificate-key {{ cert_key.stdout }}
           --apiserver-advertise-address {{ ansible_default_ipv4.address }}
@@ -67,6 +76,14 @@
       delay: 10
       until: join_result.rc == 0
       changed_when: true
+
+    - name: Wait for kubelet to start
+      ansible.builtin.systemd:
+        name: kubelet
+        state: started
+        enabled: true
+      retries: 5
+      delay: 10
 
     - name: Wait for node to be ready
       ansible.builtin.shell: |
@@ -94,3 +111,11 @@
     - name: Display verification
       ansible.builtin.debug:
         msg: "{{ verify_join.stdout_lines }}"
+
+- name: Wait before next master
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Pause between masters
+      ansible.builtin.pause:
+        seconds: 30
