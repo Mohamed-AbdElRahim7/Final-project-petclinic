@@ -1,46 +1,31 @@
 ---
-# متغيرات عامة لكل الـ nodes
+# ============================================
+# Global Variables for Kubernetes Cluster
+# ============================================
 
-# معلومات الـ cluster
+# Cluster Information
 cluster_name: petclinic
-environment: test
+env_name: test  # Changed from 'environment' to avoid reserved name
 
-# Kubernetes version
+# Kubernetes Version
 k8s_version: "1.28"
 
-# Control plane endpoint (Load Balancer DNS)
-control_plane_endpoint: "petclinic-test-master-nlb-xyz.elb.us-east-1.amazonaws.com:6443"
+# Control Plane Endpoint (Load Balancer DNS)
+# Will be updated by Ansible from Terraform output
+control_plane_endpoint: "master-nlb.example.com:6443"
 
-# Pod network CIDR (لـ Calico)
+# Network Configuration
 pod_network_cidr: "192.168.0.0/16"
-
-# Service CIDR
 service_cidr: "10.96.0.0/12"
-
-# DNS domain
 dns_domain: "cluster.local"
 
-# Kubernetes namespaces (ONE BLOCK ONLY)
-k8s_namespaces:
-  - name: dev
-    labels:
-      environment: development
-      team: devops
-  - name: test
-    labels:
-      environment: testing
-      team: qa
-  - name: prod
-    labels:
-      environment: production
-      team: operations
+# API Server Configuration
+api_server_port: 6443
 
-# CNI Configuration (Calico)
-cni_type: calico
-calico_version: "v3.27.0"
-calico_manifest_url: "https://raw.githubusercontent.com/projectcalico/calico/{{ calico_version }}/manifests/calico.yaml"
+# Ingress Configuration
+ingress_version: "v1.9.5"
 
-# Timeouts and retries
+# Timeouts and Retries
 kubeadm_init_timeout: 600
 kubeadm_join_timeout: 300
 pod_ready_timeout: 300
@@ -49,21 +34,18 @@ pod_ready_timeout: 300
 k8s_config_dir: "/etc/kubernetes"
 k8s_manifests_dir: "/etc/kubernetes/manifests"
 k8s_pki_dir: "/etc/kubernetes/pki"
+etcd_data_dir: "/var/lib/etcd"
+containerd_data_dir: "/var/lib/containerd-data"
 
-api_server_port: 6443
+# CNI Configuration
+cni_type: calico
+calico_version: "v3.27.0"
+calico_manifest_url: "https://raw.githubusercontent.com/projectcalico/calico/{{ calico_version }}/manifests/calico.yaml"
 
-# Ingress Controller Version
-ingress_version: "v1.9.5"
+# Project Information
+project_name: petclinic
 
-# ============================================
-# API Server & Ingress Configuration
-# ============================================
-api_server_port: 6443
-ingress_version: "v1.9.5"
-
-# ============================================
 # Kubernetes Namespaces with Resource Quotas
-# ============================================
 k8s_namespaces:
   - name: dev
     labels:
