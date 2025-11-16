@@ -1,9 +1,12 @@
+##############################
 # Bastion Security Group
+##############################
 resource "aws_security_group" "bastion" {
   name        = "${var.project_name}-${var.environment}-bastion-sg"
   description = "Security group for bastion host - only SSH from internet"
   vpc_id      = var.vpc_id
 
+  # SSH from your IP / office
   ingress {
     description = "SSH from allowed CIDR"
     from_port   = 22
@@ -25,7 +28,9 @@ resource "aws_security_group" "bastion" {
   }
 }
 
+##############################
 # Master Nodes Security Group
+##############################
 resource "aws_security_group" "master" {
   name        = "${var.project_name}-${var.environment}-master-sg"
   description = "Security group for K8s master nodes"
@@ -49,7 +54,16 @@ resource "aws_security_group" "master" {
     security_groups = [aws_security_group.bastion.id]
   }
 
-  # K8s API from load balancer
+  # ✅ أهم حاجة: K8s API من كل الـ VPC عشان kubelet / controllers / pods
+  ingress {
+    description = "K8s API from VPC"
+    from_port   = 6443
+    to_port     = 6443
+    protocol    = "tcp"
+    cidr_blocks = [var.vpc_cidr]
+  }
+
+  # K8s API from load balancer (لو استخدمت NLB داخلي)
   ingress {
     description     = "K8s API from LB"
     from_port       = 6443
@@ -58,7 +72,7 @@ resource "aws_security_group" "master" {
     security_groups = [aws_security_group.lb.id]
   }
 
-  # Self traffic (masters)
+  # All traffic between masters
   ingress {
     description = "All traffic between masters"
     from_port   = 0
@@ -80,7 +94,9 @@ resource "aws_security_group" "master" {
   }
 }
 
+##############################
 # Worker Nodes Security Group
+##############################
 resource "aws_security_group" "worker" {
   name        = "${var.project_name}-${var.environment}-worker-sg"
   description = "Security group for K8s worker nodes"
@@ -95,7 +111,7 @@ resource "aws_security_group" "worker" {
     security_groups = [aws_security_group.bastion.id]
   }
 
-  # NodePort Services
+  # NodePort Services inside VPC
   ingress {
     description = "NodePort Services"
     from_port   = 30000
@@ -104,22 +120,22 @@ resource "aws_security_group" "worker" {
     cidr_blocks = [var.vpc_cidr]
   }
 
-  # Allow all traffic between workers
-  ingress {
-    description = "All traffic between workers"
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    self        = true
-  }
-
-  # CNI and overlay network (Calico/Flannel)
+  # CNI and overlay network (Calico/Flannel) داخل الـ VPC
   ingress {
     description = "CNI traffic"
     from_port   = 0
     to_port     = 0
     protocol    = "-1"
     cidr_blocks = [var.vpc_cidr]
+  }
+
+  # All traffic between workers
+  ingress {
+    description = "All traffic between workers"
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    self        = true
   }
 
   egress {
@@ -135,7 +151,9 @@ resource "aws_security_group" "worker" {
   }
 }
 
+##############################
 # Load Balancer Security Group
+##############################
 resource "aws_security_group" "lb" {
   name        = "${var.project_name}-${var.environment}-lb-sg"
   description = "Security group for master load balancer"
@@ -172,9 +190,11 @@ resource "aws_security_group" "lb" {
   }
 }
 
-# Separate rules to avoid circular dependency
+##############################
+# Extra rules (separate resources)
+##############################
 
-# Allow master to access worker nodes (Kubelet)
+# Allow master -> worker (Kubelet 10250)
 resource "aws_security_group_rule" "worker_from_master" {
   type                     = "ingress"
   from_port                = 10250
@@ -184,7 +204,7 @@ resource "aws_security_group_rule" "worker_from_master" {
   source_security_group_id = aws_security_group.master.id
 }
 
-# Allow worker to access master nodes (all traffic needed for cluster)
+# Allow worker -> master (all required traffic)
 resource "aws_security_group_rule" "master_from_worker" {
   type                     = "ingress"
   from_port                = 0
@@ -193,4 +213,3 @@ resource "aws_security_group_rule" "master_from_worker" {
   security_group_id        = aws_security_group.master.id
   source_security_group_id = aws_security_group.worker.id
 }
-
