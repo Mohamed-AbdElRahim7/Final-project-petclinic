@@ -31,13 +31,14 @@ jobs:
       - name: 📥 Checkout Code
         uses: actions/checkout@v4
 
-      - name: 🔐 Configure AWS Credentials
+      - name: 🔐 Configure AWS
         uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
           aws-region: ${{ env.AWS_REGION }}
+
 
       - name: 🧪 Test AWS Connection
         run: aws sts get-caller-identity
@@ -175,3 +176,4 @@ jobs:
       - name: 🚀 Run Ansible Playbook
         working-directory: ansible-k8s-setup
         run: ansible-playbook playbooks/complete-setup.yml -i inventory/hosts.ini
+
