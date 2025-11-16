@@ -6,7 +6,6 @@ on:
       - main
     paths:
       - 'terraform-k8s-infrastructure/**'
-  
   workflow_dispatch:
 
 env:
@@ -92,13 +91,13 @@ jobs:
           path: /tmp/terraform-outputs
           retention-days: 7
 
-      - name: ⏳ Wait for EC2 Boot (5 minutes)
+      - name: ⏳ Wait for EC2 Boot (8 minutes)
         run: |
-          echo "⏳ Waiting 5 minutes for:"
+          echo "⏳ Waiting 8 minutes for:"
           echo "  • EC2 instances to boot"
           echo "  • User-data scripts to complete"
           echo "  • Kubernetes components to install"
-          sleep 300
+          sleep 480
 
   ansible-provision:
     name: Configure Kubernetes Cluster
@@ -228,74 +227,72 @@ jobs:
         working-directory: ansible-k8s-setup
         run: cat inventory/hosts.ini
 
-      - name: ⏳ Additional Wait (2 min)
-        run: |
-          echo "⏳ Additional 2 minutes for user-data completion..."
-          sleep 120
-
-      - name: 🔌 Test Connectivity
+      - name: ⏳ Smart Wait for User-Data
         working-directory: ansible-k8s-setup
         run: |
-          echo "🔌 Testing connectivity..."
-          ansible all -i inventory/hosts.ini -m ping || echo "⚠️ Some nodes not ready yet"
+          echo "⏳ Waiting for all nodes to complete user-data..."
 
-      - name: 🔍 Check Node Ready Status
-        working-directory: ansible-k8s-setup
-        run: |
-          echo "🔍 Checking if user-data completed on all nodes..."
+          MAX_ATTEMPTS=20
+          ATTEMPT=0
           
-          for host in master-1 master-2 master-3 worker-1 worker-2 worker-3; do
-            echo "Checking $host..."
-            ansible $host -i inventory/hosts.ini -m shell -a "ls -l /tmp/node-ready" || echo "⚠️ $host not ready"
+          while [ $ATTEMPT -lt $MAX_ATTEMPTS ]; do
+            echo "Check $((ATTEMPT+1))/$MAX_ATTEMPTS..."
+            
+            ALL_READY=true
+            for host in master-1 master-2 master-3 worker-1 worker-2 worker-3; do
+              if ansible $host -i inventory/hosts.ini -m shell \
+                -a "test -f /tmp/node-ready" &>/dev/null; then
+                echo "  ✅ $host ready"
+              else
+                echo "  ⏳ $host not ready yet"
+                ALL_READY=false
+              fi
+            done
+            
+            if [ "$ALL_READY" = true ]; then
+              echo ""
+              echo "✅ All nodes ready!"
+              break
+            fi
+            
+            ATTEMPT=$((ATTEMPT+1))
+            if [ $ATTEMPT -lt $MAX_ATTEMPTS ]; then
+              echo "  Waiting 30 seconds..."
+              sleep 30
+            fi
           done
-
-      - name: "✅ Step 1/8: Skip Verification (SSH works)"
-        working-directory: ansible-k8s-setup
-        run: |
-          echo "⏭️ Skipping node-ready marker check"
-          echo "✅ SSH connectivity verified - proceeding"
+          
+          if [ $ATTEMPT -eq $MAX_ATTEMPTS ]; then
+            echo "⚠️ Timeout - but proceeding anyway"
+          fi
 
       - name: "🎯 Step 2/8: Init First Master"
         working-directory: ansible-k8s-setup
-        run: |
-          echo "🎯 Step 2/8: Initialize First Master"
-          ansible-playbook -i inventory/hosts.ini playbooks/02-init-first-master.yml
+        run: ansible-playbook -i inventory/hosts.ini playbooks/02-init-first-master.yml
 
       - name: "🔗 Step 3/8: Join Masters"
         working-directory: ansible-k8s-setup
-        run: |
-          echo "🔗 Step 3/8: Join Other Masters"
-          ansible-playbook -i inventory/hosts.ini playbooks/03-join-masters.yml
+        run: ansible-playbook -i inventory/hosts.ini playbooks/03-join-masters.yml
 
       - name: "👷 Step 4/8: Join Workers"
         working-directory: ansible-k8s-setup
-        run: |
-          echo "👷 Step 4/8: Join Workers"
-          ansible-playbook -i inventory/hosts.ini playbooks/04-join-workers.yml
+        run: ansible-playbook -i inventory/hosts.ini playbooks/04-join-workers.yml
 
       - name: "🌐 Step 5/8: Install CNI"
         working-directory: ansible-k8s-setup
-        run: |
-          echo "🌐 Step 5/8: Install Calico CNI"
-          ansible-playbook -i inventory/hosts.ini playbooks/05-install-cni.yml
+        run: ansible-playbook -i inventory/hosts.ini playbooks/05-install-cni.yml
 
       - name: "📦 Step 6/8: Create Namespaces"
         working-directory: ansible-k8s-setup
-        run: |
-          echo "📦 Step 6/8: Create Namespaces"
-          ansible-playbook -i inventory/hosts.ini playbooks/06-create-namespaces.yml
+        run: ansible-playbook -i inventory/hosts.ini playbooks/06-create-namespaces.yml
 
       - name: "🖥️ Step 7/8: Setup Kubectl"
         working-directory: ansible-k8s-setup
-        run: |
-          echo "🖥️ Step 7/8: Setup kubectl on Bastion"
-          ansible-playbook -i inventory/hosts.ini playbooks/07-setup-kubectl-bastion.yml
+        run: ansible-playbook -i inventory/hosts.ini playbooks/07-setup-kubectl-bastion.yml
 
       - name: "🔀 Step 8/8: Install Ingress"
         working-directory: ansible-k8s-setup
-        run: |
-          echo "🔀 Step 8/8: Install Ingress Controller"
-          ansible-playbook -i inventory/hosts.ini playbooks/08-install-ingress-nginx.yml
+        run: ansible-playbook -i inventory/hosts.ini playbooks/08-install-ingress-nginx.yml
 
       - name: 📥 Fetch Kubeconfig
         run: |
@@ -304,7 +301,6 @@ jobs:
             ubuntu@${BASTION_IP}:~/.kube/config /tmp/kubeconfig || true
 
       - name: 📦 Upload Kubeconfig
-        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: kubeconfig
@@ -324,4 +320,3 @@ jobs:
           echo "• API:      ${LB_DNS}:6443"
           echo "• Masters:  3"
           echo "• Workers:  3"
-
