@@ -50,6 +50,17 @@
         msg: "{{ calico_apply.stdout_lines }}"
       when: need_install and calico_apply.stdout_lines is defined
 
+    - name: Wait for network to stabilize after CNI installation
+      ansible.builtin.pause:
+        seconds: 30
+      when: need_install
+
+    - name: Wait for SSH connection to be restored
+      ansible.builtin.wait_for_connection:
+        delay: 5
+        timeout: 300
+      when: need_install
+
     - name: Wait for Calico deployment to be available
       ansible.builtin.shell: |
         kubectl rollout status deployment/calico-kube-controllers -n kube-system --timeout=300s
@@ -58,6 +69,7 @@
       retries: 5
       delay: 10
       until: calico_deployment.rc == 0
+      failed_when: false
 
     - name: Wait for Calico DaemonSet to be ready
       ansible.builtin.shell: |
