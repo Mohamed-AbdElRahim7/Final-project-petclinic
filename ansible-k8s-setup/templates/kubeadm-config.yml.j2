@@ -1,6 +1,6 @@
 ---
 # ============================================
-# Kubeadm Configuration for HA Cluster
+# Kubeadm Configuration for NON-HA (master-1 only)
 # ============================================
 
 apiVersion: kubeadm.k8s.io/v1beta3
@@ -29,21 +29,22 @@ apiVersion: kubeadm.k8s.io/v1beta3
 kind: ClusterConfiguration
 kubernetesVersion: v{{ k8s_version }}.0
 clusterName: {{ cluster_name }}-{{ environment }}
+
+# !!! IMPORTANT !!!
+# Use master-1 IP directly (No NLB)
 controlPlaneEndpoint: "{{ ansible_default_ipv4.address }}:6443"
+
 certificatesDir: {{ k8s_pki_dir }}
 imageRepository: registry.k8s.io
 
-# Networking
 networking:
   dnsDomain: {{ dns_domain }}
   podSubnet: {{ pod_network_cidr }}
   serviceSubnet: {{ service_cidr }}
 
-# API Server Configuration
 apiServer:
   timeoutForControlPlane: 4m0s
   certSANs:
-  - "{{ control_plane_endpoint.split(':')[0] }}"
   - "{{ ansible_default_ipv4.address }}"
   - "{{ ansible_hostname }}"
   - "localhost"
@@ -63,7 +64,6 @@ apiServer:
     readOnly: false
     pathType: DirectoryOrCreate
 
-# Controller Manager Configuration
 controllerManager:
   extraArgs:
     bind-address: 0.0.0.0
@@ -71,12 +71,10 @@ controllerManager:
     pod-eviction-timeout: 30s
     cluster-signing-duration: 87600h
 
-# Scheduler Configuration
 scheduler:
   extraArgs:
     bind-address: 0.0.0.0
 
-# etcd Configuration
 etcd:
   local:
     dataDir: {{ etcd_data_dir }}
@@ -138,4 +136,3 @@ mode: iptables
 clusterCIDR: {{ pod_network_cidr }}
 
 metricsBindAddress: 0.0.0.0:10249
-
