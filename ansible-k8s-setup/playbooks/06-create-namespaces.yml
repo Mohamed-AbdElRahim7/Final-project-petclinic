@@ -1,100 +1,55 @@
 ---
-# ============================================
-# Playbook 6: Create Kubernetes Namespaces
-# Purpose: Setup dev, test, prod environments
-# ============================================
-
-- name: Create Kubernetes Namespaces with Policies
+- name: Create Kubernetes Namespaces
   hosts: first_master
-  gather_facts: no
-  become: yes
+  gather_facts: false
+  become: true
   
+  vars:
+    namespaces:
+      - name: dev
+        environment: development
+      - name: test
+        environment: testing
+      - name: prod
+        environment: production
+
   tasks:
     - name: Check existing namespaces
-      command: kubectl get namespaces -o json
+      ansible.builtin.shell: kubectl get namespaces -o jsonpath='{.items[*].metadata.name}'
       register: existing_namespaces
       changed_when: false
 
-    - name: Parse existing namespaces
-      set_fact:
-        existing_ns_list: "{{ existing_namespaces.stdout | from_json | json_query('items[*].metadata.name') }}"
-
     - name: Display existing namespaces
-      debug:
-        msg: |
-          📋 Existing namespaces:
-          {{ existing_ns_list | join(', ') }}
+      ansible.builtin.debug:
+        msg: "Existing namespaces: {{ existing_namespaces.stdout }}"
 
-    - name: Create namespace manifests
-      template:
-        src: "../templates/namespace.yml.j2"
-        dest: "/tmp/{{ item.name }}-namespace.yml"
-        mode: '0644'
-      loop: "{{ k8s_namespaces }}"
-      loop_control:
-        loop_var: namespace
-      when: item.name not in existing_ns_list
-
-    - name: Apply namespace manifests
-      command: kubectl apply -f /tmp/{{ item.name }}-namespace.yml
-      loop: "{{ k8s_namespaces }}"
-      when: item.name not in existing_ns_list
+    - name: Create namespaces
+      ansible.builtin.shell: |
+        kubectl create namespace {{ item.name }} --dry-run=client -o yaml | \
+        kubectl apply -f -
+      loop: "{{ namespaces }}"
       register: ns_create
+      changed_when: "'created' in ns_create.stdout or 'configured' in ns_create.stdout"
 
-    - name: Display namespace creation output
-      debug:
-        msg: "{{ item.stdout_lines }}"
-      loop: "{{ ns_create.results }}"
-      when: item.changed | default(false)
-
-    - name: Label kube-system namespace for network policies
-      command: >
-        kubectl label namespace kube-system
-        kubernetes.io/metadata.name=kube-system
-        --overwrite
+    - name: Label namespaces
+      ansible.builtin.shell: |
+        kubectl label namespace {{ item.name }} \
+          environment={{ item.environment }} \
+          managed-by=ansible \
+          --overwrite
+      loop: "{{ namespaces }}"
       changed_when: false
 
-    - name: Get all namespaces with labels
-      command: kubectl get namespaces --show-labels
-      register: all_namespaces
-
-    - name: Display all namespaces
-      debug:
-        msg: "{{ all_namespaces.stdout_lines }}"
-
-    - name: Get resource quotas
-      command: kubectl get quota --all-namespaces
-      register: quotas
-
-    - name: Display quotas
-      debug:
-        msg: "{{ quotas.stdout_lines }}"
-
-    - name: Get limit ranges
-      command: kubectl get limitrange --all-namespaces
-      register: limits
-
-    - name: Display limit ranges
-      debug:
-        msg: "{{ limits.stdout_lines }}"
-
-    - name: Get network policies
-      command: kubectl get networkpolicy --all-namespaces
-      register: netpol
-
-    - name: Display network policies
-      debug:
-        msg: "{{ netpol.stdout_lines }}"
-
     - name: Create ServiceAccount for each namespace
-      shell: |
+      ansible.builtin.shell: |
         kubectl create serviceaccount {{ item.name }}-admin \
           -n {{ item.name }} \
           --dry-run=client -o yaml | kubectl apply -f -
-      loop: "{{ k8s_namespaces }}"
+      loop: "{{ namespaces }}"
+      changed_when: false
 
     - name: Create Role for namespace admin
-      shell: |
+      ansible.builtin.shell: |
         cat <<EOF | kubectl apply -f -
         apiVersion: rbac.authorization.k8s.io/v1
         kind: Role
@@ -106,82 +61,60 @@
           resources: ["*"]
           verbs: ["*"]
         EOF
-      loop: "{{ k8s_namespaces }}"
+      loop: "{{ namespaces }}"
+      changed_when: false
 
     - name: Create RoleBinding
-      shell: |
+      ansible.builtin.shell: |
         kubectl create rolebinding {{ item.name }}-admin-binding \
           --role=namespace-admin \
           --serviceaccount={{ item.name }}:{{ item.name }}-admin \
           -n {{ item.name }} \
           --dry-run=client -o yaml | kubectl apply -f -
-      loop: "{{ k8s_namespaces }}"
+      loop: "{{ namespaces }}"
+      changed_when: false
 
-    - name: Create context aliases script
-      copy:
-        content: |
-          #!/bin/bash
-          # Quick namespace switching aliases
-          
-          alias kdev='kubectl config set-context --current --namespace=dev && echo "✅ Switched to dev namespace"'
-          alias ktest='kubectl config set-context --current --namespace=test && echo "✅ Switched to test namespace"'
-          alias kprod='kubectl config set-context --current --namespace=prod && echo "✅ Switched to prod namespace"'
-          alias kdefault='kubectl config set-context --current --namespace=default && echo "✅ Switched to default namespace"'
-          
-          # Show current namespace
-          alias kcn='kubectl config view --minify | grep namespace | cut -d" " -f6'
-          
-          echo "Namespace aliases loaded! Use: kdev, ktest, kprod, kdefault, kcn"
-        dest: /tmp/namespace-aliases.sh
-        mode: '0755'
+    - name: Get all namespaces with labels
+      ansible.builtin.shell: kubectl get namespaces --show-labels
+      register: all_namespaces
+      changed_when: false
 
-    - name: Fetch namespace aliases to bastion
-      fetch:
-        src: /tmp/namespace-aliases.sh
-        dest: /tmp/namespace-aliases.sh
-        flat: yes
+    - name: Display all namespaces
+      ansible.builtin.debug:
+        msg: "{{ all_namespaces.stdout_lines }}"
 
-  post_tasks:
-    - name: Summary - Namespaces created
-      debug:
-        msg: |
-          ╔══════════════════════════════════════════════════════╗
-          ║  ✅ Namespaces Created Successfully!                ║
-          ╚══════════════════════════════════════════════════════╝
-          
-          📊 Created Namespaces:
-          ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-          {% for ns in k8s_namespaces %}
-          • {{ ns.name }} ({{ ns.labels.environment }})
-            - CPU Quota: {{ ns.resource_quota.cpu }}
-            - Memory Quota: {{ ns.resource_quota.memory }}
-            - Pods Quota: {{ ns.resource_quota.pods }}
-          {% endfor %}
-          
-          🔒 Security Policies:
-          ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-          ✅ Resource Quotas: Applied
-          ✅ Limit Ranges: Applied
-          ✅ Network Policies: 
-             - Default deny all
-             - Allow DNS
-             - Allow same namespace
-             - Allow ingress controller
-          ✅ RBAC: ServiceAccount + Role + RoleBinding created
-          
-          🎯 Quick Commands:
-          ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-          # Switch namespaces (add to ~/.bashrc)
-          source /tmp/namespace-aliases.sh
-          
-          kdev    # Switch to dev
-          ktest   # Switch to test
-          kprod   # Switch to prod
-          kcn     # Show current namespace
-          
-          # Check resources
-          kubectl get all -n dev
-          kubectl describe quota -n dev
-          kubectl describe limitrange -n dev
-          
-          🚀 Ready to deploy applications!
+    - name: Get ServiceAccounts
+      ansible.builtin.shell: |
+        for ns in dev test prod; do
+          echo "Namespace: $ns"
+          kubectl get sa -n $ns
+          echo ""
+        done
+      register: service_accounts
+      changed_when: false
+
+    - name: Display ServiceAccounts
+      ansible.builtin.debug:
+        msg: "{{ service_accounts.stdout_lines }}"
+
+    - name: Summary
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "  Namespaces Created Successfully!"
+          - "=========================================="
+          - ""
+          - "Created Namespaces:"
+          - "  - dev (development)"
+          - "  - test (testing)"
+          - "  - prod (production)"
+          - ""
+          - "RBAC Configured:"
+          - "  - ServiceAccount: <namespace>-admin"
+          - "  - Role: namespace-admin"
+          - "  - RoleBinding: <namespace>-admin-binding"
+          - ""
+          - "Quick Commands:"
+          - "  kubectl get all -n dev"
+          - "  kubectl get all -n test"
+          - "  kubectl get all -n prod"
