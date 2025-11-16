@@ -91,13 +91,13 @@ jobs:
           path: /tmp/terraform-outputs
           retention-days: 7
 
-      - name: ⏳ Wait for EC2 Boot (8 minutes)
+      - name: ⏳ Wait for EC2 Boot (10 minutes)
         run: |
-          echo "⏳ Waiting 8 minutes for:"
+          echo "⏳ Waiting 10 minutes for:"
           echo "  • EC2 instances to boot"
           echo "  • User-data scripts to complete"
           echo "  • Kubernetes components to install"
-          sleep 720
+          sleep 600
 
   ansible-provision:
     name: Configure Kubernetes Cluster
@@ -232,7 +232,7 @@ jobs:
         run: |
           echo "⏳ Waiting for all nodes to complete user-data..."
 
-          MAX_ATTEMPTS=60
+          MAX_ATTEMPTS=10
           ATTEMPT=0
           
           while [ $ATTEMPT -lt $MAX_ATTEMPTS ]; do
@@ -320,4 +320,5 @@ jobs:
           echo "• API:      ${LB_DNS}:6443"
           echo "• Masters:  3"
           echo "• Workers:  3"
+
 
