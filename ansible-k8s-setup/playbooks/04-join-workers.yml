@@ -1,89 +1,70 @@
 ---
-# Playbook 4: إضافة الـ workers للـ cluster
-# الغرض: join كل الـ worker nodes
-
 - name: Join Workers to Cluster
   hosts: workers
-  gather_facts: yes
-  become: yes
-  
+  become: true
+  gather_facts: true
+  serial: 1
+
   tasks:
     - name: Check if node is already joined
-      stat:
-        path: /etc/kubernetes/kubelet.conf
-      register: node_joined
+      ansible.builtin.shell: |
+        kubectl --kubeconfig=/etc/kubernetes/kubelet.conf get nodes 2>/dev/null | grep -q "{{ inventory_hostname }}" && echo "joined" || echo "not_joined"
+      register: node_status
+      changed_when: false
+      failed_when: false
 
     - name: Display join status
-      debug:
-        msg: "Node {{ ansible_hostname }} is {{ 'already joined' if node_joined.stat.exists else 'NOT joined' }}"
+      ansible.builtin.debug:
+        msg: "Node {{ ansible_hostname }} is {{ 'already joined' if 'joined' in node_status.stdout else 'NOT joined' }}"
 
-    - block:
-        - name: Get join token from first master
-          shell: |
-            kubeadm token create --print-join-command
-          delegate_to: "{{ groups['first_master'][0] }}"
-          register: join_command
-          run_once: yes
+    - name: Skip if already joined
+      ansible.builtin.meta: end_host
+      when: "'joined' in node_status.stdout"
 
-        - name: Display join command
-          debug:
-            msg: "{{ join_command.stdout }}"
-
-        - name: Join worker to cluster
-          shell: |
-            {{ join_command.stdout }}
-          register: join_output
-          async: "{{ kubeadm_join_timeout }}"
-          poll: 10
-
-        - name: Display join output
-          debug:
-            msg: "{{ join_output.stdout_lines }}"
-
-        - name: Wait for node to be ready
-          command: kubectl get node {{ ansible_hostname }}
-          register: node_status
-          until: "'Ready' in node_status.stdout or 'NotReady' in node_status.stdout"
-          retries: 30
-          delay: 10
-          delegate_to: "{{ groups['first_master'][0] }}"
-
-        - name: Display node status
-          debug:
-            msg: "{{ node_status.stdout_lines }}"
-
-      when: not node_joined.stat.exists
-
-    - name: Label worker nodes
-      command: >
-        kubectl label node {{ ansible_hostname }}
-        node-role.kubernetes.io/worker=worker
-        --overwrite
+    - name: Generate new join token on first master
+      ansible.builtin.shell: |
+        kubeadm token create --print-join-command
+      register: join_command
+      changed_when: false
       delegate_to: "{{ groups['first_master'][0] }}"
-      when: not node_joined.stat.exists
 
-    - name: Verify all nodes in cluster
-      command: kubectl get nodes -o wide
-      register: all_nodes
+    - name: Display join command
+      ansible.builtin.debug:
+        msg: "{{ join_command.stdout }}"
+
+    - name: Join worker to cluster
+      ansible.builtin.shell: |
+        {{ join_command.stdout }}
+      register: join_result
+      async: 600
+      poll: 10
+      retries: 3
+      delay: 10
+      until: join_result.rc == 0
+      changed_when: true
+
+    - name: Wait for node to be ready
+      ansible.builtin.shell: |
+        kubectl --kubeconfig=/etc/kubernetes/admin.conf get node {{ ansible_hostname }} -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}'
+      register: node_ready
+      until: node_ready.stdout == "True"
+      retries: 30
+      delay: 10
       delegate_to: "{{ groups['first_master'][0] }}"
-      run_once: yes
 
-    - name: Display all nodes
-      debug:
-        msg: "{{ all_nodes.stdout_lines }}"
-      run_once: yes
+    - name: Label worker node
+      ansible.builtin.shell: |
+        kubectl --kubeconfig=/etc/kubernetes/admin.conf label node {{ ansible_hostname }} node-role.kubernetes.io/worker='' --overwrite
+      delegate_to: "{{ groups['first_master'][0] }}"
+      changed_when: true
 
-  post_tasks:
-    - name: Summary - Workers joined
-      debug:
-        msg: |
-          ═══════════════════════════════════════════
-          ✅ Worker {{ ansible_hostname }} Joined Successfully!
-          ═══════════════════════════════════════════
-          
-          Current Cluster Status:
-          - Masters: {{ groups['masters'] | length }}
-          - Workers: {{ groups['workers'] | length }}
-          
-          Next Step:
-          Install CNI: ansible-playbook 05-install-cni.yml
+    - name: Verify worker joined successfully
+      ansible.builtin.shell: |
+        kubectl --kubeconfig=/etc/kubernetes/admin.conf get nodes {{ ansible_hostname }} -o wide
+      register: verify_join
+      changed_when: false
+      delegate_to: "{{ groups['first_master'][0] }}"
+
+    - name: Display verification
+      ansible.builtin.debug:
+        msg: "{{ verify_join.stdout_lines }}"
