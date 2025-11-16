@@ -1,79 +1,147 @@
 ---
-# Playbook 7: إعداد kubectl على الـ bastion
-# الغرض: نسخ kubeconfig من master إلى bastion
-
 - name: Setup kubectl on Bastion
-  hosts: localhost
-  gather_facts: no
-  connection: local
-  
-  vars:
-    bastion_ip: "{{ lookup('env', 'BASTION_IP') | default('BASTION_IP_HERE', true) }}"
-    first_master_ip: "{{ groups['first_master'][0] }}"
+  hosts: first_master
+  gather_facts: false
+  become: true
   
   tasks:
-    - name: Display bastion IP
-      debug:
-        msg: "Configuring kubectl on bastion: {{ bastion_ip }}"
+    - name: Verify kubeconfig exists on master
+      ansible.builtin.stat:
+        path: /home/ubuntu/.kube/config
+      register: master_kubeconfig
 
-    - name: Fetch kubeconfig from first master
-      fetch:
+    - name: Fail if kubeconfig not found
+      ansible.builtin.fail:
+        msg: "Kubeconfig not found on master at /home/ubuntu/.kube/config"
+      when: not master_kubeconfig.stat.exists
+
+    - name: Fetch kubeconfig from master
+      ansible.builtin.fetch:
         src: /home/ubuntu/.kube/config
         dest: /tmp/kubeconfig-from-master
-        flat: yes
-      delegate_to: "{{ first_master_ip }}"
+        flat: true
 
-    - name: Create .kube directory on bastion
-      file:
+- name: Configure kubectl on Bastion
+  hosts: bastion
+  gather_facts: false
+  become: true
+  
+  tasks:
+    - name: Create .kube directory for ubuntu user
+      ansible.builtin.file:
         path: /home/ubuntu/.kube
         state: directory
         owner: ubuntu
         group: ubuntu
         mode: '0755'
-      delegate_to: "{{ bastion_ip }}"
-      become: yes
 
     - name: Copy kubeconfig to bastion
-      copy:
+      ansible.builtin.copy:
         src: /tmp/kubeconfig-from-master
         dest: /home/ubuntu/.kube/config
         owner: ubuntu
         group: ubuntu
         mode: '0600'
-      delegate_to: "{{ bastion_ip }}"
-      become: yes
 
-    - name: Test kubectl on bastion
-      command: kubectl get nodes
-      delegate_to: "{{ bastion_ip }}"
-      become: yes
+    - name: Create .kube directory for root
+      ansible.builtin.file:
+        path: /root/.kube
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Copy kubeconfig to root
+      ansible.builtin.copy:
+        src: /tmp/kubeconfig-from-master
+        dest: /root/.kube/config
+        owner: root
+        group: root
+        mode: '0600'
+
+    - name: Install bash completion for kubectl
+      ansible.builtin.shell: |
+        kubectl completion bash > /etc/bash_completion.d/kubectl
+      args:
+        creates: /etc/bash_completion.d/kubectl
+
+    - name: Create kubectl aliases
+      ansible.builtin.copy:
+        content: |
+          # Kubectl aliases
+          alias k='kubectl'
+          alias kgp='kubectl get pods'
+          alias kgs='kubectl get svc'
+          alias kgn='kubectl get nodes'
+          alias kga='kubectl get all'
+          alias kgns='kubectl get namespaces'
+          
+          # Namespace switching
+          alias kdev='kubectl config set-context --current --namespace=dev'
+          alias ktest='kubectl config set-context --current --namespace=test'
+          alias kprod='kubectl config set-context --current --namespace=prod'
+          alias kdefault='kubectl config set-context --current --namespace=default'
+          
+          # Show current namespace
+          alias kcn='kubectl config view --minify | grep namespace: | cut -d" " -f6'
+          
+          # Quick describe
+          alias kdp='kubectl describe pod'
+          alias kds='kubectl describe service'
+          alias kdn='kubectl describe node'
+          
+          # Logs
+          alias kl='kubectl logs'
+          alias klf='kubectl logs -f'
+        dest: /home/ubuntu/.kubectl_aliases
+        owner: ubuntu
+        group: ubuntu
+        mode: '0644'
+
+    - name: Add aliases to bashrc
+      ansible.builtin.lineinfile:
+        path: /home/ubuntu/.bashrc
+        line: "source ~/.kubectl_aliases"
+        create: true
+
+    - name: Test kubectl access
+      ansible.builtin.shell: kubectl get nodes
+      become: true
       become_user: ubuntu
       register: kubectl_test
+      changed_when: false
 
     - name: Display kubectl test result
-      debug:
+      ansible.builtin.debug:
         msg: "{{ kubectl_test.stdout_lines }}"
 
-  post_tasks:
-    - name: Summary - kubectl configured on bastion
-      debug:
-        msg: |
-          ═══════════════════════════════════════════
-          ✅ kubectl Configured on Bastion!
-          ═══════════════════════════════════════════
-          
-          You can now SSH to bastion and use kubectl:
-          
-          ssh -i petclinic-test-key.pem ubuntu@{{ bastion_ip }}
-          kubectl get nodes
-          kubectl get pods --all-namespaces
-          
-          Available namespaces:
-          - dev
-          - test
-          - prod
-          
-          Quick commands:
-          kdev   # Switch to dev namespace
-          ktest  # Switch to test namespace
-          kprod  # Switch to prod namespace
+    - name: Get cluster info
+      ansible.builtin.shell: kubectl cluster-info
+      become: true
+      become_user: ubuntu
+      register: cluster_info
+      changed_when: false
+
+    - name: Display cluster info
+      ansible.builtin.debug:
+        msg: "{{ cluster_info.stdout_lines }}"
+
+    - name: Summary
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "  kubectl Configured on Bastion!"
+          - "=========================================="
+          - ""
+          - "SSH to bastion and use kubectl:"
+          - "ssh -i petclinic-test-key.pem ubuntu@{{ ansible_host }}"
+          - ""
+          - "Quick commands available:"
+          - "  k        - kubectl shortcut"
+          - "  kgp      - get pods"
+          - "  kgn      - get nodes"
+          - "  kdev     - switch to dev namespace"
+          - "  ktest    - switch to test namespace"
+          - "  kprod    - switch to prod namespace"
+          - ""
+          - "Test: kubectl get nodes"
