@@ -97,7 +97,7 @@ jobs:
           echo "  • EC2 instances to boot"
           echo "  • User-data scripts to complete"
           echo "  • Kubernetes components to install"
-          sleep 480
+          sleep 720
 
   ansible-provision:
     name: Configure Kubernetes Cluster
@@ -232,7 +232,7 @@ jobs:
         run: |
           echo "⏳ Waiting for all nodes to complete user-data..."
 
-          MAX_ATTEMPTS=20
+          MAX_ATTEMPTS=60
           ATTEMPT=0
           
           while [ $ATTEMPT -lt $MAX_ATTEMPTS ]; do
@@ -320,3 +320,4 @@ jobs:
           echo "• API:      ${LB_DNS}:6443"
           echo "• Masters:  3"
           echo "• Workers:  3"
+
