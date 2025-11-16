@@ -80,6 +80,18 @@ jobs:
           path: /tmp/terraform-outputs/
           retention-days: 7
 
+      - name: ⏳ Wait for EC2 Boot
+        run: |
+          echo "Waiting 3 minutes for EC2 instances to boot..."
+          sleep 180
+
+      - name: 🔌 Test Bastion SSH
+        run: |
+          ssh -i /tmp/terraform-outputs/petclinic-test-key.pem \
+            -o StrictHostKeyChecking=no \
+            ubuntu@${{ steps.extract.outputs.bastion_ip }} \
+            'echo "Bastion reachable"' || echo "Bastion not ready"
+
   ansible-provision:
     name: Ansible – Configure Kubernetes Cluster
     runs-on: ubuntu-latest
@@ -122,11 +134,9 @@ jobs:
           mkdir -p ~/.ssh
           cp /tmp/terraform-outputs/petclinic-test-key.pem ~/.ssh/
           chmod 400 ~/.ssh/petclinic-test-key.pem
-          cat >> ~/.ssh/config <<EOF
-          Host *
-              StrictHostKeyChecking no
-              UserKnownHostsFile=/dev/null
-          EOF
+          echo "Host *" >> ~/.ssh/config
+          echo "  StrictHostKeyChecking no" >> ~/.ssh/config
+          echo "  UserKnownHostsFile=/dev/null" >> ~/.ssh/config
           chmod 600 ~/.ssh/config
 
       - name: 📝 Generate Inventory
@@ -140,12 +150,14 @@ jobs:
           echo "[bastion]" > inventory/hosts.ini
           echo "bastion ansible_host=$BASTION_IP ansible_user=ubuntu" >> inventory/hosts.ini
           echo "" >> inventory/hosts.ini
+
           echo "[masters]" >> inventory/hosts.ini
           IDX=1
           for IP in $MASTER_IPS; do
             echo "master-$IDX ansible_host=$IP node_type=master node_index=$IDX" >> inventory/hosts.ini
             IDX=$((IDX+1))
           done
+
           echo "" >> inventory/hosts.ini
           echo "[workers]" >> inventory/hosts.ini
           IDX=1
@@ -153,70 +165,13 @@ jobs:
             echo "worker-$IDX ansible_host=$IP node_type=worker node_index=$IDX" >> inventory/hosts.ini
             IDX=$((IDX+1))
           done
-          cat >> inventory/hosts.ini <<EOF
-
-          [first_master]
-          master-1
-
-          [other_masters]
-          master-2
-          master-3
-
-          [k8s_cluster:children]
-          masters
-          workers
-
-          [all:children]
-          bastion
-          k8s_cluster
-
-          [k8s_cluster:vars]
-          ansible_user=ubuntu
-          ansible_ssh_private_key_file=~/.ssh/petclinic-test-key.pem
-          ansible_python_interpreter=/usr/bin/python3
-          ansible_ssh_common_args='-o ProxyCommand="ssh -W %h:%p -i ~/.ssh/petclinic-test-key.pem -o StrictHostKeyChecking=no ubuntu@$BASTION_IP"'
-
-          [masters:vars]
-          k8s_role=master
-
-          [workers:vars]
-          k8s_role=worker
-          EOF
 
           sed -i "s|control_plane_endpoint:.*|control_plane_endpoint: \"$LB_DNS:6443\"|" inventory/group_vars/all.yml
 
-      - name: 🔌 Test Connectivity
+      - name: 🔌 Ping Test
         working-directory: ansible-k8s-setup
-        run: ansible all -i inventory/hosts.ini -m ping || echo "Some nodes not ready yet"
+        run: ansible all -i inventory/hosts.ini -m ping
 
-      - name: "✅ Step 1: Verify Nodes"
+      - name: 🚀 Run Ansible Playbook
         working-directory: ansible-k8s-setup
-        run: ansible-playbook playbooks/01-verify-nodes.yml -i inventory/hosts.ini
-
-      - name: "🎯 Step 2: Init First Master"
-        working-directory: ansible-k8s-setup
-        run: ansible-playbook playbooks/02-init-first-master.yml -i inventory/hosts.ini
-
-      - name: "🔗 Step 3: Join Masters"
-        working-directory: ansible-k8s-setup
-        run: ansible-playbook playbooks/03-join-masters.yml -i inventory/hosts.ini
-
-      - name: "👷 Step 4: Join Workers"
-        working-directory: ansible-k8s-setup
-        run: ansible-playbook playbooks/04-join-workers.yml -i inventory/hosts.ini
-
-      - name: "🌐 Step 5: Install CNI"
-        working-directory: ansible-k8s-setup
-        run: ansible-playbook playbooks/05-install-cni.yml -i inventory/hosts.ini
-
-      - name: "📦 Step 6: Create Namespaces"
-        working-directory: ansible-k8s-setup
-        run: ansible-playbook playbooks/06-create-namespaces.yml -i inventory/hosts.ini
-
-      - name: "🖥️ Step 7: Setup Kubectl"
-        working-directory: ansible-k8s-setup
-        run: ansible-playbook playbooks/07-setup-kubectl-bastion.yml -i inventory/hosts.ini
-
-      - name: "🔀 Step 8: Install Ingress"
-        working-directory: ansible-k8s-setup
-        run: ansible-playbook playbooks/08-install-ingress-nginx.yml -i inventory/hosts.ini
+        run: ansible-playbook playbooks/complete-setup.yml -i inventory/hosts.ini
