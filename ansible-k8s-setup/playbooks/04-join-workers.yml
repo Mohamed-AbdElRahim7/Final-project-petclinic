@@ -8,10 +8,12 @@
   tasks:
     - name: Check if node is already joined
       ansible.builtin.shell: |
-        kubectl --kubeconfig=/etc/kubernetes/kubelet.conf get nodes 2>/dev/null | grep -q "{{ inventory_hostname }}" && echo "joined" || echo "not_joined"
+        kubectl --kubeconfig=/etc/kubernetes/admin.conf \
+          get nodes {{ inventory_hostname }} --no-headers 2>/dev/null && echo "joined" || echo "not_joined"
       register: node_status
       changed_when: false
       failed_when: false
+      delegate_to: "{{ groups['first_master'][0] }}"
 
     - name: Display join status
       ansible.builtin.debug:
@@ -39,7 +41,9 @@
 
     - name: Get control plane endpoint from kubeadm config
       ansible.builtin.shell: |
-        kubectl --kubeconfig=/etc/kubernetes/admin.conf -n kube-system get configmap kubeadm-config -o jsonpath='{.data.ClusterConfiguration}' | grep controlPlaneEndpoint | awk '{print $2}'
+        kubectl --kubeconfig=/etc/kubernetes/admin.conf -n kube-system \
+          get configmap kubeadm-config -o jsonpath='{.data.ClusterConfiguration}' \
+          | grep controlPlaneEndpoint | awk '{print $2}' | tr -d '"'
       register: control_plane_endpoint
       changed_when: false
       delegate_to: "{{ groups['first_master'][0] }}"
@@ -66,7 +70,7 @@
       until: join_result.rc == 0
       changed_when: true
 
-    - name: Wait for kubelet to start
+    - name: Ensure kubelet is started and enabled
       ansible.builtin.systemd:
         name: kubelet
         state: started
@@ -76,7 +80,8 @@
 
     - name: Wait for node to be ready
       ansible.builtin.shell: |
-        kubectl --kubeconfig=/etc/kubernetes/admin.conf get node {{ ansible_hostname }} -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}'
+        kubectl --kubeconfig=/etc/kubernetes/admin.conf \
+          get node {{ ansible_hostname }} -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}'
       register: node_ready
       until: node_ready.stdout == "True"
       retries: 30
