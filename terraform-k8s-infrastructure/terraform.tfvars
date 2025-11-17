@@ -5,7 +5,7 @@ owner       = "DevOps-Team"
 project_name = "pet"
 
 # Network Configuration
-vpc_cidr           = "172.16.0.0/16"
+vpc_cidr           = "10.0.0.0/16"
 availability_zones = ["us-east-1a", "us-east-1b", "us-east-1c"]
 
 # Cluster Configuration
@@ -26,7 +26,8 @@ allowed_ssh_cidr = "0.0.0.0/0"  # Change to your IP for security
 enable_monitoring = true
 
 
-bucket_name = "petclinic-atos-17"
+bucket_name = "petclinic-atos-18"
+
 
 
 
