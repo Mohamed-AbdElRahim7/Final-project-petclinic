@@ -266,33 +266,37 @@ jobs:
             echo "⚠️ Timeout - but proceeding anyway"
           fi
 
-      - name: "🎯 Step 2/8: Init First Master"
+      - name: "🎯 Step 2/9: Init First Master"
         working-directory: ansible-k8s-setup
         run: ansible-playbook -i inventory/hosts.ini playbooks/02-init-first-master.yml
 
-      - name: "🔗 Step 3/8: Join Masters"
+      - name: "🔗 Step 3/9: Join Masters"
         working-directory: ansible-k8s-setup
         run: ansible-playbook -i inventory/hosts.ini playbooks/03-join-masters.yml
 
-      - name: "👷 Step 4/8: Join Workers"
+      - name: "👷 Step 4/9: Join Workers"
         working-directory: ansible-k8s-setup
         run: ansible-playbook -i inventory/hosts.ini playbooks/04-join-workers.yml
 
-      - name: "🌐 Step 5/8: Install CNI"
+      - name: "🌐 Step 5/9: Install CNI"
         working-directory: ansible-k8s-setup
         run: ansible-playbook -i inventory/hosts.ini playbooks/05-install-cni.yml
 
-      - name: "📦 Step 6/8: Create Namespaces"
+      - name: "📦 Step 6/9: Create Namespaces"
         working-directory: ansible-k8s-setup
         run: ansible-playbook -i inventory/hosts.ini playbooks/06-create-namespaces.yml
 
-      - name: "🖥️ Step 7/8: Setup Kubectl"
+      - name: "🖥️ Step 7/9: Setup Kubectl"
         working-directory: ansible-k8s-setup
         run: ansible-playbook -i inventory/hosts.ini playbooks/07-setup-kubectl-bastion.yml
 
-      - name: "🔀 Step 8/8: Install Ingress"
+      - name: "🔀 Step 8/9: Install Ingress"
         working-directory: ansible-k8s-setup
         run: ansible-playbook -i inventory/hosts.ini playbooks/08-install-ingress-nginx.yml
+
+      - name: "🔧 Step 9/9: Final Cluster Fixes"
+        working-directory: ansible-k8s-setup
+        run: ansible-playbook -i inventory/hosts.ini playbooks/99-final-fixes.yml
 
       - name: 📥 Fetch Kubeconfig
         run: |
@@ -320,7 +324,3 @@ jobs:
           echo "• API:      ${LB_DNS}:6443"
           echo "• Masters:  3"
           echo "• Workers:  3"
-
-
-
-
