@@ -9,6 +9,10 @@
   gather_facts: no
   become: yes
   
+  vars:
+    ingress_version: "v1.9.4"
+    pod_ready_timeout: 300
+
   tasks:
     - name: Check if Ingress Controller is already installed
       command: kubectl get pods -n ingress-nginx -l app.kubernetes.io/name=ingress-nginx
@@ -151,28 +155,3 @@
           {% if lb_endpoint.stdout %}
           • Endpoint: {{ lb_endpoint.stdout }}
           {% endif %}
-          
-          🎯 Usage Example:
-          ```yaml
-          apiVersion: networking.k8s.io/v1
-          kind: Ingress
-          metadata:
-            name: myapp-ingress
-            namespace: dev
-          spec:
-            ingressClassName: nginx
-            rules:
-            - host: myapp.example.com
-              http:
-                paths:
-                - path: /
-                  pathType: Prefix
-                  backend:
-                    service:
-                      name: myapp-service
-                      port:
-                        number: 80
-          ```
-          
-          🔗 Access your apps via:
-          http://<LB-ENDPOINT>
