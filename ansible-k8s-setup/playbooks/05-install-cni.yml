@@ -89,7 +89,7 @@
 
     - name: Verify cluster is healthy
       ansible.builtin.shell: |
-        kubectl get nodes --no-headers | grep -v " Ready "
+        kubectl get nodes --no-headers | grep -v " Ready " || true
       register: not_ready
       failed_when: not_ready.stdout != ""
       changed_when: false
