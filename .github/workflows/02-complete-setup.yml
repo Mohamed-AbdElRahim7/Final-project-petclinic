@@ -79,8 +79,8 @@ jobs:
           echo "  • Run user-data scripts"
           echo "  • Install Kubernetes components"
           echo ""
-          for i in {1..48}; do
-            echo -ne "Progress: $((i*100/48))% [$i/48]\r"
+          for i in {1..30}; do
+            echo -ne "Progress: $((i*100/30))% [$i/30]\r"
             sleep 10
           done
           echo ""
@@ -317,3 +317,4 @@ jobs:
           echo "  kubectl get nodes"
           echo "  kubectl get pods -A"
           echo ""
+
