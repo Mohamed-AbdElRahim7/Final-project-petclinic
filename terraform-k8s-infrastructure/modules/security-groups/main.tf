@@ -6,7 +6,6 @@ resource "aws_security_group" "bastion" {
   description = "Security group for bastion host - only SSH from internet"
   vpc_id      = var.vpc_id
 
-  # SSH from your IP / office
   ingress {
     description = "SSH from allowed CIDR"
     from_port   = 22
@@ -36,7 +35,6 @@ resource "aws_security_group" "master" {
   description = "Security group for K8s master nodes"
   vpc_id      = var.vpc_id
 
-  # SSH from bastion only
   ingress {
     description     = "SSH from bastion"
     from_port       = 22
@@ -45,7 +43,6 @@ resource "aws_security_group" "master" {
     security_groups = [aws_security_group.bastion.id]
   }
 
-  # Kubernetes API server from bastion
   ingress {
     description     = "K8s API from bastion"
     from_port       = 6443
@@ -54,7 +51,6 @@ resource "aws_security_group" "master" {
     security_groups = [aws_security_group.bastion.id]
   }
 
-  # K8s API from VPC (kubelet, controllers, pods, workers, masters)
   ingress {
     description = "K8s API from VPC"
     from_port   = 6443
@@ -63,7 +59,6 @@ resource "aws_security_group" "master" {
     cidr_blocks = [var.vpc_cidr]
   }
 
-  # K8s API from load balancer (internal NLB)
   ingress {
     description     = "K8s API from LB"
     from_port       = 6443
@@ -72,25 +67,22 @@ resource "aws_security_group" "master" {
     security_groups = [aws_security_group.lb.id]
   }
 
-  # etcd traffic (master <-> master)
   ingress {
-    description = "etcd peer & client traffic"
+    description = "etcd peer & client"
     from_port   = 2379
     to_port     = 2380
     protocol    = "tcp"
     cidr_blocks = [var.vpc_cidr]
   }
 
-  # kubelet API calls from control plane / nodes
   ingress {
-    description = "kubelet API (10250) from VPC"
+    description = "kubelet API"
     from_port   = 10250
     to_port     = 10250
     protocol    = "tcp"
     cidr_blocks = [var.vpc_cidr]
   }
 
-  # Calico BGP (لو مفعّل)
   ingress {
     description = "Calico BGP"
     from_port   = 179
@@ -99,9 +91,8 @@ resource "aws_security_group" "master" {
     cidr_blocks = [var.vpc_cidr]
   }
 
-  # All traffic between masters
   ingress {
-    description = "All traffic between masters"
+    description = "All master traffic"
     from_port   = 0
     to_port     = 0
     protocol    = "-1"
@@ -109,7 +100,7 @@ resource "aws_security_group" "master" {
   }
 
   egress {
-    description = "Allow all outbound traffic"
+    description = "Allow all outbound"
     from_port   = 0
     to_port     = 0
     protocol    = "-1"
@@ -129,7 +120,6 @@ resource "aws_security_group" "worker" {
   description = "Security group for K8s worker nodes"
   vpc_id      = var.vpc_id
 
-  # SSH from bastion only
   ingress {
     description     = "SSH from bastion"
     from_port       = 22
@@ -138,25 +128,22 @@ resource "aws_security_group" "worker" {
     security_groups = [aws_security_group.bastion.id]
   }
 
-  # NodePort Services inside VPC
   ingress {
-    description = "NodePort Services"
+    description = "NodePort"
     from_port   = 30000
     to_port     = 32767
     protocol    = "tcp"
     cidr_blocks = [var.vpc_cidr]
   }
 
-  # kubelet API
   ingress {
-    description = "kubelet API (10250) from VPC"
+    description = "kubelet API"
     from_port   = 10250
     to_port     = 10250
     protocol    = "tcp"
     cidr_blocks = [var.vpc_cidr]
   }
 
-  # Calico BGP (لو مفعّل)
   ingress {
     description = "Calico BGP"
     from_port   = 179
@@ -165,7 +152,6 @@ resource "aws_security_group" "worker" {
     cidr_blocks = [var.vpc_cidr]
   }
 
-  # CNI and overlay network (Calico/Flannel) داخل الـ VPC
   ingress {
     description = "CNI traffic"
     from_port   = 0
@@ -174,9 +160,8 @@ resource "aws_security_group" "worker" {
     cidr_blocks = [var.vpc_cidr]
   }
 
-  # All traffic between workers
   ingress {
-    description = "All traffic between workers"
+    description = "All worker traffic"
     from_port   = 0
     to_port     = 0
     protocol    = "-1"
@@ -184,7 +169,7 @@ resource "aws_security_group" "worker" {
   }
 
   egress {
-    description = "Allow all outbound traffic"
+    description = "Allow all outbound"
     from_port   = 0
     to_port     = 0
     protocol    = "-1"
@@ -201,10 +186,9 @@ resource "aws_security_group" "worker" {
 ##############################
 resource "aws_security_group" "lb" {
   name        = "${var.project_name}-${var.environment}-lb-sg"
-  description = "Security group for master load balancer"
+  description = "Security group for Kubernetes API LB"
   vpc_id      = var.vpc_id
 
-  # K8s API from VPC
   ingress {
     description = "K8s API from VPC"
     from_port   = 6443
@@ -213,7 +197,6 @@ resource "aws_security_group" "lb" {
     cidr_blocks = [var.vpc_cidr]
   }
 
-  # Allow from bastion
   ingress {
     description     = "K8s API from bastion"
     from_port       = 6443
@@ -223,7 +206,7 @@ resource "aws_security_group" "lb" {
   }
 
   egress {
-    description = "Allow all outbound traffic"
+    description = "Allow all outbound"
     from_port   = 0
     to_port     = 0
     protocol    = "-1"
@@ -236,10 +219,9 @@ resource "aws_security_group" "lb" {
 }
 
 ##############################
-# Extra rules (separate resources)
+# Extra rules
 ##############################
 
-# Allow master -> worker (Kubelet 10250)
 resource "aws_security_group_rule" "worker_from_master" {
   type                     = "ingress"
   from_port                = 10250
@@ -249,7 +231,6 @@ resource "aws_security_group_rule" "worker_from_master" {
   source_security_group_id = aws_security_group.master.id
 }
 
-# Allow worker -> master (all required traffic)
 resource "aws_security_group_rule" "master_from_worker" {
   type                     = "ingress"
   from_port                = 0
@@ -257,66 +238,4 @@ resource "aws_security_group_rule" "master_from_worker" {
   protocol                 = "-1"
   security_group_id        = aws_security_group.master.id
   source_security_group_id = aws_security_group.worker.id
-}
-
-##############################
-# Network Load Balancer for API Server
-##############################
-
-resource "aws_lb" "master" {
-  name               = "${var.project_name}-${var.environment}-master-nlb"
-  internal           = true
-  load_balancer_type = "network"
-  subnets            = var.subnet_ids
-
-  enable_deletion_protection       = false
-  enable_cross_zone_load_balancing = true
-
-  tags = {
-    Name = "${var.project_name}-${var.environment}-master-nlb"
-    Role = "KubernetesAPI"
-  }
-}
-
-resource "aws_lb_target_group" "master" {
-  name     = "${var.project_name}-${var.environment}-master-tg"
-  port     = 6443
-  protocol = "TCP"
-  vpc_id   = var.vpc_id
-
-  health_check {
-    enabled             = true
-    healthy_threshold   = 2
-    unhealthy_threshold = 2
-    interval            = 10
-    protocol            = "TCP"
-    port                = "6443"
-    timeout             = 10
-  }
-
-  stickiness {
-    enabled = false
-    type    = "source_ip"
-  }
-
-  deregistration_delay = 30
-
-  tags = {
-    Name = "${var.project_name}-${var.environment}-master-tg"
-  }
-}
-
-resource "aws_lb_listener" "master" {
-  load_balancer_arn = aws_lb.master.arn
-  port              = "6443"
-  protocol          = "TCP"
-
-  default_action {
-    type             = "forward"
-    target_group_arn = aws_lb_target_group.master.arn
-  }
-
-  tags = {
-    Name = "${var.project_name}-${var.environment}-master-listener"
-  }
 }
