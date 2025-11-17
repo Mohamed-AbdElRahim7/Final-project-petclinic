@@ -52,13 +52,18 @@
 
     - name: Wait for network to stabilize after CNI installation
       ansible.builtin.pause:
-        seconds: 30
+        seconds: 45
       when: need_install
 
     - name: Wait for SSH connection to be restored
       ansible.builtin.wait_for_connection:
-        delay: 5
-        timeout: 300
+        delay: 10
+        timeout: 600
+        sleep: 5
+      when: need_install
+
+    - name: Verify connectivity after reconnection
+      ansible.builtin.ping:
       when: need_install
 
     - name: Wait for Calico deployment to be available
@@ -66,10 +71,11 @@
         kubectl rollout status deployment/calico-kube-controllers -n kube-system --timeout=300s
       register: calico_deployment
       changed_when: false
-      retries: 5
-      delay: 10
+      retries: 10
+      delay: 15
       until: calico_deployment.rc == 0
       failed_when: false
+      when: need_install or not need_install
 
     - name: Wait for Calico DaemonSet to be ready
       ansible.builtin.shell: |
