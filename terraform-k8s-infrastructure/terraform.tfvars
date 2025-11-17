@@ -1,6 +1,6 @@
 # AWS Configuration
 aws_region = "us-east-1"
-environment = "proud"
+environment = "prod"
 owner       = "DevOps-Team"
 project_name = "pet"
 
@@ -27,6 +27,7 @@ enable_monitoring = true
 
 
 bucket_name = "petclinic-atos-17"
+
 
 
 
