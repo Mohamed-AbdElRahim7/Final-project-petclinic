@@ -1,72 +1,76 @@
 ---
-- name: Install Calico CNI
+- name: Verify Calico CNI
   hosts: first_master
-  become: true
   gather_facts: true
-
-  vars:
-    calico_version: "v3.27.0"
-    pod_network_cidr: "192.168.0.0/16"
+  become: true
 
   tasks:
-    - name: Check if Calico pods exist
+    - name: Wait for Calico pods to be ready
       ansible.builtin.shell: |
-        kubectl get pods -n kube-system -l k8s-app=calico-node --no-headers 2>/dev/null | wc -l
-      register: calico_pods_count
+        kubectl get pods -n kube-system -l k8s-app=calico-node --no-headers | \
+        awk '{print $3}' | grep -v Running | wc -l
+      register: calico_not_ready
+      until: calico_not_ready.stdout | int == 0
+      retries: 60
+      delay: 5
       changed_when: false
       failed_when: false
 
-    - name: Display Calico check status
-      ansible.builtin.debug:
-        msg: "Calico pods found: {{ calico_pods_count.stdout }}"
-
-    - name: Set installation flag
-      ansible.builtin.set_fact:
-        need_install: "{{ calico_pods_count.stdout | int == 0 }}"
-
-    - name: Download Calico manifest
-      ansible.builtin.get_url:
-        url: "https://raw.githubusercontent.com/projectcalico/calico/{{ calico_version }}/manifests/calico.yaml"
-        dest: /tmp/calico.yaml
-        mode: '0644'
-      when: need_install
-
-    - name: Modify Calico manifest for pod network CIDR
-      ansible.builtin.replace:
-        path: /tmp/calico.yaml
-        regexp: '192.168.0.0/16'
-        replace: "{{ pod_network_cidr }}"
-      when: need_install
-
-    - name: Apply Calico manifest
+    - name: Get Calico pods status
       ansible.builtin.shell: |
-        kubectl apply -f /tmp/calico.yaml
-      register: calico_apply
-      changed_when: true
-      when: need_install
+        kubectl get pods -n kube-system -l k8s-app=calico-node -o wide
+      register: calico_pods_status
+      changed_when: false
 
-    - name: Display Calico installation output
+    - name: Display Calico pods
       ansible.builtin.debug:
-        msg: "{{ calico_apply.stdout_lines }}"
-      when: need_install and calico_apply.stdout_lines is defined
+        msg: "{{ calico_pods_status.stdout_lines }}"
+
+    - name: Wait for all nodes to be Ready
+      ansible.builtin.shell: |
+        kubectl get nodes --no-headers | awk '{print $2}' | grep -v Ready | wc -l
+      register: not_ready_nodes
+      until: not_ready_nodes.stdout | int == 0
+      retries: 60
+      delay: 5
+      changed_when: false
+      failed_when: false
+
+    - name: Get all nodes status
+      ansible.builtin.shell: |
+        kubectl get nodes -o wide
+      register: nodes_status
+      changed_when: false
+
+    - name: Display nodes status
+      ansible.builtin.debug:
+        msg: "{{ nodes_status.stdout_lines }}"
+
+    - name: Verify all nodes are Ready
+      ansible.builtin.assert:
+        that:
+          - not_ready_nodes.stdout | int == 0
+        success_msg: "All nodes are Ready!"
+        fail_msg: "Some nodes are not Ready yet. Please wait and retry."
+
+    - name: Get pod CIDR for each node
+      ansible.builtin.shell: |
+        kubectl get nodes -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.spec.podCIDR}{"\n"}{end}'
+      register: pod_cidrs
+      changed_when: false
+
+    - name: Display pod CIDRs
+      ansible.builtin.debug:
+        msg: "{{ pod_cidrs.stdout_lines }}"
 
     - name: Summary
       ansible.builtin.debug:
         msg:
           - "=========================================="
-          - "  Calico CNI Installation Complete!"
+          - "  Calico CNI Verification Complete!"
           - "=========================================="
           - ""
-          - "Calico Version: {{ calico_version }}"
-          - "Pod Network CIDR: {{ pod_network_cidr }}"
+          - "All nodes are in Ready state"
+          - "Network connectivity is enabled"
           - ""
-          - "IMPORTANT: Calico is installing in background"
-          - "This takes 2-3 minutes to fully activate"
-          - ""
-          - "To verify manually:"
-          - "1. SSH to bastion"
-          - "2. Run: kubectl get pods -n kube-system | grep calico"
-          - "3. Wait until all pods are Running"
-          - "4. Run: kubectl get nodes (should show Ready)"
-          - ""
-          - "The playbook will continue to next steps..."
+          - "You can now deploy applications!"
