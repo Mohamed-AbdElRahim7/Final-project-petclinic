@@ -1,5 +1,5 @@
 #!/bin/bash
-set +e   # ⛔ ممنوع توقف على أول error
+set -euo pipefail
 
 # ===== Logging =====
 exec > >(tee /var/log/user-data.log)
@@ -97,12 +97,16 @@ retry wget -q https://s3.amazonaws.com/amazoncloudwatch-agent/ubuntu/amd64/lates
 dpkg -i -E amazoncloudwatch-agent.deb || true
 rm -f amazoncloudwatch-agent.deb
 
+echo "[STEP] Ensure kubelet is running"
+systemctl daemon-reload || true
+systemctl restart kubelet || true
+
 echo "════════════════════════════════════════"
 echo "User-Data Complete: $(date)"
 echo "════════════════════════════════════════"
 
 echo "[STEP] Create node-ready marker"
-touch /tmp/node-ready
+/usr/bin/touch /tmp/node-ready
 chmod 644 /tmp/node-ready
 
 echo "✅ Node ready for Ansible"
