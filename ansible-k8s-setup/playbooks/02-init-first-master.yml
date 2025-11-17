@@ -6,10 +6,12 @@
   hosts: first_master
   gather_facts: yes
   become: yes
-  
+
   vars:
     kubeadm_config_file: /tmp/kubeadm-config.yaml
-  
+    # control_plane_endpoint بييجي من group_vars/all.yml
+    # و GitHub Actions بتعدله لـ NLB DNS:6443
+
   tasks:
     - name: Check if Kubernetes is already initialized
       stat:
@@ -60,7 +62,7 @@
           shell: |
             # Extract control-plane join command
             grep -A 3 "kubeadm join.*--control-plane" /tmp/kubeadm-init-output.txt > /tmp/master-join-command.sh || true
-            
+
             # Extract worker join command
             grep -A 1 "kubeadm join" /tmp/kubeadm-init-output.txt | grep -v "control-plane" | tail -3 > /tmp/worker-join-command.sh || true
           args:
@@ -143,10 +145,10 @@
           ═══════════════════════════════════════════
           Master: {{ ansible_hostname }}
           Control Plane Endpoint: {{ control_plane_endpoint }}
-          
+
           Next Steps:
           1. Join other masters: ansible-playbook 03-join-masters.yml
           2. Join workers: ansible-playbook 04-join-workers.yml
           3. Install CNI: ansible-playbook 05-install-cni.yml
-          
+
           Admin kubeconfig saved to: /tmp/kubernetes-admin.conf
