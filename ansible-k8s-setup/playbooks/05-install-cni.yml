@@ -1,76 +1,106 @@
 ---
-- name: Verify Calico CNI
+- name: Install and Verify Calico CNI
   hosts: first_master
-  gather_facts: true
   become: true
+  gather_facts: true
+
+  vars:
+    calico_version: "v3.27.0"
+    pod_network_cidr: "192.168.0.0/16"
 
   tasks:
-    - name: Wait for Calico pods to be ready
+    - name: Check if Calico DaemonSet exists
       ansible.builtin.shell: |
-        kubectl get pods -n kube-system -l k8s-app=calico-node --no-headers | \
-        awk '{print $3}' | grep -v Running | wc -l
-      register: calico_not_ready
-      until: calico_not_ready.stdout | int == 0
-      retries: 60
-      delay: 5
+        kubectl get daemonset calico-node -n kube-system --no-headers 2>/dev/null | wc -l
+      register: calico_ds_exists
       changed_when: false
       failed_when: false
+
+    - name: Install Calico if not exists
+      block:
+        - name: Download Calico manifest
+          ansible.builtin.get_url:
+            url: "https://raw.githubusercontent.com/projectcalico/calico/{{ calico_version }}/manifests/calico.yaml"
+            dest: /tmp/calico.yaml
+            mode: '0644'
+
+        - name: Apply Calico manifest
+          ansible.builtin.shell: |
+            kubectl apply -f /tmp/calico.yaml
+          register: calico_apply
+          changed_when: true
+
+        - name: Display installation output
+          ansible.builtin.debug:
+            msg: "Calico CNI installation started..."
+
+      when: calico_ds_exists.stdout | int == 0
+
+    - name: Wait for Calico DaemonSet to exist
+      ansible.builtin.shell: |
+        kubectl get daemonset calico-node -n kube-system --no-headers 2>/dev/null
+      register: ds_check
+      until: ds_check.rc == 0
+      retries: 30
+      delay: 10
+      changed_when: false
+
+    - name: Wait for Calico pods to be Running (this takes 2-5 minutes)
+      ansible.builtin.shell: |
+        TOTAL=$(kubectl get pods -n kube-system -l k8s-app=calico-node --no-headers | wc -l)
+        RUNNING=$(kubectl get pods -n kube-system -l k8s-app=calico-node --no-headers | grep Running | wc -l)
+        echo "$RUNNING/$TOTAL"
+      register: calico_status
+      until: calico_status.stdout is search('/')  and calico_status.stdout.split('/')[0] == calico_status.stdout.split('/')[1] and calico_status.stdout.split('/')[0] | int > 0
+      retries: 60
+      delay: 10
+      changed_when: false
 
     - name: Get Calico pods status
       ansible.builtin.shell: |
         kubectl get pods -n kube-system -l k8s-app=calico-node -o wide
-      register: calico_pods_status
+      register: calico_pods
       changed_when: false
 
     - name: Display Calico pods
       ansible.builtin.debug:
-        msg: "{{ calico_pods_status.stdout_lines }}"
+        msg: "{{ calico_pods.stdout_lines }}"
 
-    - name: Wait for all nodes to be Ready
+    - name: Wait for ALL nodes to be Ready (this takes 1-3 minutes)
       ansible.builtin.shell: |
-        kubectl get nodes --no-headers | awk '{print $2}' | grep -v Ready | wc -l
-      register: not_ready_nodes
-      until: not_ready_nodes.stdout | int == 0
+        TOTAL=$(kubectl get nodes --no-headers | wc -l)
+        READY=$(kubectl get nodes --no-headers | grep " Ready " | wc -l)
+        echo "$READY/$TOTAL"
+      register: nodes_status
+      until: nodes_status.stdout is search('/') and nodes_status.stdout.split('/')[0] == nodes_status.stdout.split('/')[1] and nodes_status.stdout.split('/')[0] | int > 0
       retries: 60
-      delay: 5
+      delay: 10
       changed_when: false
-      failed_when: false
 
     - name: Get all nodes status
       ansible.builtin.shell: |
         kubectl get nodes -o wide
-      register: nodes_status
+      register: all_nodes
       changed_when: false
 
-    - name: Display nodes status
+    - name: Display all nodes
       ansible.builtin.debug:
-        msg: "{{ nodes_status.stdout_lines }}"
+        msg: "{{ all_nodes.stdout_lines }}"
 
-    - name: Verify all nodes are Ready
-      ansible.builtin.assert:
-        that:
-          - not_ready_nodes.stdout | int == 0
-        success_msg: "All nodes are Ready!"
-        fail_msg: "Some nodes are not Ready yet. Please wait and retry."
-
-    - name: Get pod CIDR for each node
+    - name: Verify cluster is healthy
       ansible.builtin.shell: |
-        kubectl get nodes -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.spec.podCIDR}{"\n"}{end}'
-      register: pod_cidrs
+        kubectl get nodes --no-headers | grep -v " Ready "
+      register: not_ready
+      failed_when: not_ready.stdout != ""
       changed_when: false
-
-    - name: Display pod CIDRs
-      ansible.builtin.debug:
-        msg: "{{ pod_cidrs.stdout_lines }}"
 
     - name: Summary
       ansible.builtin.debug:
         msg:
           - "=========================================="
-          - "  Calico CNI Verification Complete!"
+          - "  Calico CNI Fully Ready!"
           - "=========================================="
           - ""
-          - "All nodes are in Ready state"
-          - "Network connectivity is enabled"
-          - ""
-          - "You can now deploy applications!"
+          - "Calico Version: {{ calico_version }}"
+          - "All nodes are Ready"
+          - "Cluster is healthy and ready for workloads"
