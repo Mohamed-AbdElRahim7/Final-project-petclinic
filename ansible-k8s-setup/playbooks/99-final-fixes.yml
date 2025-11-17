@@ -1,0 +1,112 @@
+---
+- name: Final Cluster Setup Fixes
+  hosts: first_master
+  become: true
+  gather_facts: false
+
+  tasks:
+    - name: Check Ingress pods
+      ansible.builtin.shell: |
+        kubectl get pods -n ingress-nginx --no-headers 2>/dev/null | wc -l
+      register: ingress_pods_count
+      changed_when: false
+      failed_when: false
+
+    - name: Install Ingress if not exists
+      block:
+        - name: Apply Ingress manifest
+          ansible.builtin.shell: |
+            kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/controller-v1.9.4/deploy/static/provider/aws/deploy.yaml
+          register: ingress_install
+
+        - name: Display installation output
+          ansible.builtin.debug:
+            msg: "{{ ingress_install.stdout_lines }}"
+
+        - name: Wait for Ingress namespace
+          ansible.builtin.shell: |
+            kubectl get namespace ingress-nginx
+          register: ns_check
+          until: ns_check.rc == 0
+          retries: 10
+          delay: 5
+
+        - name: Wait for Ingress pods to start
+          ansible.builtin.pause:
+            seconds: 30
+            prompt: "Waiting for Ingress pods to initialize..."
+
+      when: ingress_pods_count.stdout | int == 0
+
+    - name: Get Ingress pods status
+      ansible.builtin.shell: |
+        kubectl get pods -n ingress-nginx
+      register: ingress_pods
+
+    - name: Display Ingress pods
+      ansible.builtin.debug:
+        msg: "{{ ingress_pods.stdout_lines }}"
+
+    - name: Get Ingress service
+      ansible.builtin.shell: |
+        kubectl get svc -n ingress-nginx
+      register: ingress_svc
+
+    - name: Display Ingress service
+      ansible.builtin.debug:
+        msg: "{{ ingress_svc.stdout_lines }}"
+
+    - name: Copy kubeconfig to ubuntu home
+      ansible.builtin.copy:
+        src: /etc/kubernetes/admin.conf
+        dest: /home/ubuntu/.kube/config
+        owner: ubuntu
+        group: ubuntu
+        mode: '0600'
+        remote_src: true
+
+    - name: Verify kubeconfig works
+      ansible.builtin.shell: |
+        kubectl get nodes
+      become: false
+      become_user: ubuntu
+      register: kubectl_test
+
+    - name: Final status check
+      ansible.builtin.shell: |
+        echo "=== NODES ==="
+        kubectl get nodes
+        echo ""
+        echo "=== NAMESPACES ==="
+        kubectl get ns
+        echo ""
+        echo "=== ALL PODS ==="
+        kubectl get pods -A
+        echo ""
+        echo "=== INGRESS SERVICE ==="
+        kubectl get svc -n ingress-nginx
+      register: final_check
+
+    - name: Display final status
+      ansible.builtin.debug:
+        msg: "{{ final_check.stdout_lines }}"
+
+    - name: Success summary
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "  Cluster Setup Complete!"
+          - "=========================================="
+          - ""
+          - "Connection Info:"
+          - "  Bastion: 34.225.22.82"
+          - "  API: petclinic-test-master-nlb-cc63ea8341eee8f2.elb.us-east-1.amazonaws.com:6443"
+          - ""
+          - "SSH to cluster:"
+          - "  ssh -i petclinic-test-key.pem ubuntu@34.225.22.82"
+          - "  ssh ubuntu@10.0.10.32  # to master-1"
+          - ""
+          - "Test commands on master-1:"
+          - "  kubectl get nodes"
+          - "  kubectl get pods -A"
+          - "  kubectl get svc -n ingress-nginx"
