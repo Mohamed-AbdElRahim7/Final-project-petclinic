@@ -91,7 +91,7 @@ module "worker_nodes" {
 # Load Balancer Module
 module "load_balancer" {
   source = "./modules/load-balancer"
-  
+
   project_name       = var.project_name
   environment        = var.environment
   vpc_id             = module.vpc.vpc_id
@@ -104,4 +104,5 @@ module "simple_s3" {
   bucket_name = var.bucket_name
   region      = var.aws_region
 }
+
 
