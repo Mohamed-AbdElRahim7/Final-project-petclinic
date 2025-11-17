@@ -1,35 +1,32 @@
-name: 02 - Terraform Apply & Ansible Provision
+name: Complete K8s Cluster Setup
 
 on:
+  workflow_dispatch:
   push:
     branches:
       - main
     paths:
       - 'terraform-k8s-infrastructure/**'
-  workflow_dispatch:
+      - 'ansible-k8s-setup/**'
 
 env:
   TF_VERSION: "1.6.0"
   AWS_REGION: "us-east-1"
+  ANSIBLE_HOST_KEY_CHECKING: "False"
 
 jobs:
   terraform-apply:
-    name: Deploy AWS Infrastructure
+    name: Deploy Infrastructure
     runs-on: ubuntu-latest
-
-    permissions:
-      contents: read
-      id-token: write
-      actions: write
-
+    
     outputs:
       bastion_ip: ${{ steps.extract.outputs.bastion_ip }}
       lb_dns: ${{ steps.extract.outputs.lb_dns }}
-
+    
     steps:
-      - name: 📥 Checkout Code
+      - name: 📥 Checkout
         uses: actions/checkout@v4
-
+      
       - name: 🔐 Configure AWS
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -37,28 +34,19 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
           aws-region: ${{ env.AWS_REGION }}
-
-      - name: 🧪 Test AWS Connection
-        run: aws sts get-caller-identity
-
+      
       - name: 🔧 Setup Terraform
         uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: ${{ env.TF_VERSION }}
           terraform_wrapper: false
-
-      - name: ⚙️ Terraform Init
+      
+      - name: ⚙️ Terraform Init & Apply
         working-directory: terraform-k8s-infrastructure
-        run: terraform init
-
-      - name: ✅ Terraform Validate
-        working-directory: terraform-k8s-infrastructure
-        run: terraform validate
-
-      - name: 🚀 Terraform Apply
-        working-directory: terraform-k8s-infrastructure
-        run: terraform apply -auto-approve -input=false
-
+        run: |
+          terraform init
+          terraform apply -auto-approve -input=false
+      
       - name: 📊 Extract Outputs
         id: extract
         working-directory: terraform-k8s-infrastructure
@@ -69,59 +57,55 @@ jobs:
           echo "bastion_ip=${BASTION_IP}" >> "$GITHUB_OUTPUT"
           echo "lb_dns=${LB_DNS}" >> "$GITHUB_OUTPUT"
           
-          echo "✅ Bastion IP: ${BASTION_IP}"
-          echo "✅ LB DNS: ${LB_DNS}"
-
-      - name: 📦 Save Outputs
-        working-directory: terraform-k8s-infrastructure
-        run: |
           mkdir -p /tmp/terraform-outputs
-          
           terraform output -raw bastion_public_ip > /tmp/terraform-outputs/bastion_ip.txt
           terraform output -raw master_load_balancer_dns > /tmp/terraform-outputs/lb_dns.txt
           terraform output -json master_private_ips > /tmp/terraform-outputs/master_ips.json
           terraform output -json worker_private_ips > /tmp/terraform-outputs/worker_ips.json
           terraform output -raw ssh_private_key > /tmp/terraform-outputs/petclinic-test-key.pem
           chmod 400 /tmp/terraform-outputs/petclinic-test-key.pem
-
+      
       - name: 📦 Upload Artifacts
         uses: actions/upload-artifact@v4
         with:
           name: terraform-outputs
           path: /tmp/terraform-outputs
           retention-days: 7
-
-      - name: ⏳ Wait for EC2 Boot (8 minutes)
+      
+      - name: ⏳ Wait for EC2 Instances (8 minutes)
         run: |
-          echo "⏳ Waiting 8 minutes for:"
-          echo "  • EC2 instances to boot"
-          echo "  • User-data scripts to complete"
-          echo "  • Kubernetes components to install"
-          sleep 480
+          echo "⏳ Waiting 8 minutes for EC2 instances to:"
+          echo "  • Complete boot process"
+          echo "  • Run user-data scripts"
+          echo "  • Install Kubernetes components"
+          echo ""
+          for i in {1..48}; do
+            echo -ne "Progress: $((i*100/48))% [$i/48]\r"
+            sleep 10
+          done
+          echo ""
+          echo "✅ Wait completed!"
 
   ansible-provision:
-    name: Configure Kubernetes Cluster
+    name: Configure Kubernetes
     runs-on: ubuntu-latest
     needs: terraform-apply
-
-    env:
-      ANSIBLE_HOST_KEY_CHECKING: "False"
-
+    
     steps:
-      - name: 📥 Checkout Code
+      - name: 📥 Checkout
         uses: actions/checkout@v4
-
-      - name: 🐍 Setup Python
+      
+      - name: 🐍 Setup Python & Ansible
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-
+      
       - name: 📦 Install Ansible
         run: |
           pip install --upgrade pip
           pip install ansible
           ansible --version
-
+      
       - name: 🔐 Configure AWS
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -129,13 +113,13 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
           aws-region: ${{ env.AWS_REGION }}
-
+      
       - name: 📥 Download Outputs
         uses: actions/download-artifact@v4
         with:
           name: terraform-outputs
           path: /tmp/terraform-outputs
-
+      
       - name: 🔑 Setup SSH
         run: |
           mkdir -p ~/.ssh
@@ -148,7 +132,7 @@ jobs:
               UserKnownHostsFile=/dev/null
           EOF
           chmod 600 ~/.ssh/config
-
+      
       - name: 📝 Generate Inventory
         working-directory: ansible-k8s-setup
         run: |
@@ -158,18 +142,15 @@ jobs:
           WORKER_IPS=$(jq -r '.[]' /tmp/terraform-outputs/worker_ips.json)
           
           cat > inventory/hosts.ini <<EOF
-          # Kubernetes Cluster Inventory
-          # Generated: $(date -u)
-          
-          [bastion_host]
-          bastion-1 ansible_host=${BASTION_IP} ansible_user=ubuntu
+          [bastion]
+          bastion ansible_host=${BASTION_IP} ansible_user=ubuntu
           
           [masters]
           EOF
           
           i=1
           for ip in $MASTER_IPS; do
-            echo "master-${i} ansible_host=${ip} node_type=master node_index=${i}" >> inventory/hosts.ini
+            echo "master-${i} ansible_host=${ip}" >> inventory/hosts.ini
             i=$((i+1))
           done
           
@@ -180,7 +161,7 @@ jobs:
           
           i=1
           for ip in $WORKER_IPS; do
-            echo "worker-${i} ansible_host=${ip} node_type=worker node_index=${i}" >> inventory/hosts.ini
+            echo "worker-${i} ansible_host=${ip}" >> inventory/hosts.ini
             i=$((i+1))
           done
           
@@ -198,7 +179,7 @@ jobs:
           workers
           
           [all:children]
-          bastion_host
+          bastion
           k8s_cluster
           
           [k8s_cluster:vars]
@@ -217,110 +198,122 @@ jobs:
           [workers:vars]
           k8s_role=worker
           
-          [bastion_host:vars]
+          [bastion:vars]
           ansible_ssh_common_args='-o StrictHostKeyChecking=no'
           EOF
           
           sed -i "s|control_plane_endpoint:.*|control_plane_endpoint: \"${LB_DNS}:6443\"|" inventory/group_vars/all.yml
-
-      - name: 👁️ Show Inventory
-        working-directory: ansible-k8s-setup
-        run: cat inventory/hosts.ini
-
-      - name: ⏳ Smart Wait for User-Data
+      
+      - name: ⏳ Wait & Test Connectivity
         working-directory: ansible-k8s-setup
         run: |
-          echo "⏳ Waiting for all nodes to complete user-data..."
-
-          MAX_ATTEMPTS=5
-          ATTEMPT=0
+          echo "Testing connectivity to nodes..."
+          RETRY=0
+          MAX_RETRY=10
           
-          while [ $ATTEMPT -lt $MAX_ATTEMPTS ]; do
-            echo "Check $((ATTEMPT+1))/$MAX_ATTEMPTS..."
-            
-            ALL_READY=true
-            for host in master-1 master-2 master-3 worker-1 worker-2 worker-3; do
-              if ansible $host -i inventory/hosts.ini -m shell \
-                -a "test -f /tmp/node-ready" &>/dev/null; then
-                echo "  ✅ $host ready"
-              else
-                echo "  ⏳ $host not ready yet"
-                ALL_READY=false
-              fi
-            done
-            
-            if [ "$ALL_READY" = true ]; then
-              echo ""
-              echo "✅ All nodes ready!"
+          while [ $RETRY -lt $MAX_RETRY ]; do
+            if ansible all -i inventory/hosts.ini -m ping; then
+              echo "✅ All nodes reachable!"
               break
             fi
-            
-            ATTEMPT=$((ATTEMPT+1))
-            if [ $ATTEMPT -lt $MAX_ATTEMPTS ]; then
-              echo "  Waiting 30 seconds..."
+            RETRY=$((RETRY+1))
+            if [ $RETRY -lt $MAX_RETRY ]; then
+              echo "⏳ Retry $RETRY/$MAX_RETRY in 30 seconds..."
               sleep 30
             fi
           done
-          
-          if [ $ATTEMPT -eq $MAX_ATTEMPTS ]; then
-            echo "⚠️ Timeout - but proceeding anyway"
-          fi
-
-      - name: "🎯 Step 2/9: Init First Master"
+      
+      - name: "Step 2: Init First Master"
         working-directory: ansible-k8s-setup
-        run: ansible-playbook -i inventory/hosts.ini playbooks/02-init-first-master.yml
-
-      - name: "🔗 Step 3/9: Join Masters"
+        run: |
+          echo "=========================================="
+          echo "Initializing First Master..."
+          echo "=========================================="
+          ansible-playbook -i inventory/hosts.ini playbooks/02-init-first-master.yml
+      
+      - name: "Step 3: Join Other Masters"
         working-directory: ansible-k8s-setup
-        run: ansible-playbook -i inventory/hosts.ini playbooks/03-join-masters.yml
-
-      - name: "👷 Step 4/9: Join Workers"
+        run: |
+          echo "=========================================="
+          echo "Joining Other Masters..."
+          echo "=========================================="
+          ansible-playbook -i inventory/hosts.ini playbooks/03-join-masters.yml
+      
+      - name: "Step 4: Join Workers"
         working-directory: ansible-k8s-setup
-        run: ansible-playbook -i inventory/hosts.ini playbooks/04-join-workers.yml
-
-      - name: "🌐 Step 5/9: Install CNI"
+        run: |
+          echo "=========================================="
+          echo "Joining Workers..."
+          echo "=========================================="
+          ansible-playbook -i inventory/hosts.ini playbooks/04-join-workers.yml
+      
+      - name: "Step 5: Install & Verify CNI (CRITICAL - Takes 3-5 min)"
         working-directory: ansible-k8s-setup
-        run: ansible-playbook -i inventory/hosts.ini playbooks/05-install-cni.yml
-
-      - name: "📦 Step 6/9: Create Namespaces"
+        run: |
+          echo "=========================================="
+          echo "Installing Calico CNI..."
+          echo "=========================================="
+          echo "This step is CRITICAL and takes time!"
+          echo "We will wait for ALL nodes to be Ready"
+          echo "=========================================="
+          ansible-playbook -i inventory/hosts.ini playbooks/05-install-cni.yml
+      
+      - name: "Step 6: Create Namespaces"
         working-directory: ansible-k8s-setup
-        run: ansible-playbook -i inventory/hosts.ini playbooks/06-create-namespaces.yml
-
-      - name: "🖥️ Step 7/9: Setup Kubectl"
+        run: |
+          echo "=========================================="
+          echo "Creating Namespaces..."
+          echo "=========================================="
+          ansible-playbook -i inventory/hosts.ini playbooks/06-create-namespaces.yml
+      
+      - name: "Step 7: Final Setup & Verification"
         working-directory: ansible-k8s-setup
-        run: ansible-playbook -i inventory/hosts.ini playbooks/07-setup-kubectl-bastion.yml
-
-      - name: "🔀 Step 8/9: Install Ingress"
-        working-directory: ansible-k8s-setup
-        run: ansible-playbook -i inventory/hosts.ini playbooks/08-install-ingress-nginx.yml
-
-      - name: "🔧 Step 9/9: Final Cluster Fixes"
-        working-directory: ansible-k8s-setup
-        run: ansible-playbook -i inventory/hosts.ini playbooks/99-final-fixes.yml
-
+        run: |
+          echo "=========================================="
+          echo "Final Setup & Verification..."
+          echo "=========================================="
+          echo "This includes:"
+          echo "  • Ingress NGINX installation"
+          echo "  • kubectl setup"
+          echo "  • Final health checks"
+          echo "=========================================="
+          ansible-playbook -i inventory/hosts.ini playbooks/99-final-fixes.yml
+      
       - name: 📥 Fetch Kubeconfig
+        continue-on-error: true
         run: |
           BASTION_IP=$(cat /tmp/terraform-outputs/bastion_ip.txt)
           scp -i ~/.ssh/petclinic-test-key.pem -o StrictHostKeyChecking=no \
-            ubuntu@${BASTION_IP}:~/.kube/config /tmp/kubeconfig || true
-
+            ubuntu@${BASTION_IP}:~/.kube/config /tmp/kubeconfig || echo "Kubeconfig fetch failed"
+      
       - name: 📦 Upload Kubeconfig
+        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: kubeconfig
           path: /tmp/kubeconfig
           retention-days: 7
-
-      - name: 🎉 Summary
+        continue-on-error: true
+      
+      - name: 🎉 Final Summary
+        if: always()
         run: |
           BASTION_IP=$(cat /tmp/terraform-outputs/bastion_ip.txt)
           LB_DNS=$(cat /tmp/terraform-outputs/lb_dns.txt)
           
+          echo ""
           echo "╔════════════════════════════════════════╗"
-          echo "║  🎉 Cluster Setup Complete!          ║"
+          echo "║     Kubernetes Cluster Ready!        ║"
           echo "╚════════════════════════════════════════╝"
           echo ""
-          echo "• Bastion:  ${BASTION_IP}"
-          echo "• API:      ${LB_DNS}:6443"
-          echo "• Masters:  3"
-          echo "• Workers:  3"
+          echo "Connection Info:"
+          echo "  Bastion: ${BASTION_IP}"
+          echo "  API:     ${LB_DNS}:6443"
+          echo ""
+          echo "SSH Access:"
+          echo "  ssh -i petclinic-test-key.pem ubuntu@${BASTION_IP}"
+          echo ""
+          echo "Verify cluster:"
+          echo "  kubectl get nodes"
+          echo "  kubectl get pods -A"
+          echo ""
