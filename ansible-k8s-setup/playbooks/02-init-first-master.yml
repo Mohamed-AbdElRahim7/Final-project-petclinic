@@ -9,8 +9,7 @@
 
   vars:
     kubeadm_config_file: /tmp/kubeadm-config.yaml
-    # control_plane_endpoint بييجي من group_vars/all.yml
-    # و GitHub Actions بتعدله لـ NLB DNS:6443
+    kubeadm_init_timeout: 900  # 15 minutes
 
   tasks:
     - name: Check if Kubernetes is already initialized
@@ -23,6 +22,24 @@
         msg: "Kubernetes is {{ 'already initialized' if k8s_initialized.stat.exists else 'NOT initialized' }}"
 
     - block:
+        # تنظيف أي محاولات فاشلة سابقة
+        - name: Clean any previous failed attempts
+          shell: |
+            kubeadm reset -f || true
+            rm -rf /etc/kubernetes/* || true
+            rm -rf /var/lib/etcd/* || true
+          changed_when: true
+
+        - name: Ensure required directories exist
+          file:
+            path: "{{ item }}"
+            state: directory
+            mode: '0755'
+          loop:
+            - /etc/kubernetes
+            - /var/lib/etcd
+            - /var/log/kubernetes
+
         - name: Create kubeadm configuration file
           template:
             src: ../templates/kubeadm-config.yml.j2
@@ -38,6 +55,19 @@
           debug:
             msg: "{{ kubeadm_config_content.stdout_lines }}"
 
+        # إعادة تشغيل الخدمات
+        - name: Restart container runtime
+          systemd:
+            name: containerd
+            state: restarted
+            daemon_reload: yes
+
+        - name: Wait for containerd to be ready
+          wait_for:
+            path: /var/run/containerd/containerd.sock
+            state: present
+            timeout: 60
+
         - name: Initialize Kubernetes cluster
           command: >
             kubeadm init
@@ -46,11 +76,15 @@
             --v=5
           register: kubeadm_init_output
           async: "{{ kubeadm_init_timeout }}"
-          poll: 10
+          poll: 15
+          retries: 2
+          delay: 30
+          until: kubeadm_init_output.rc == 0
 
         - name: Display kubeadm init output
           debug:
             msg: "{{ kubeadm_init_output.stdout_lines }}"
+          when: kubeadm_init_output.stdout is defined
 
         - name: Save kubeadm init output
           copy:
@@ -99,11 +133,41 @@
             mode: '0644'
 
         - name: Wait for API server to be ready
+          command: kubectl get --raw /healthz
+          register: api_health
+          until: api_health.rc == 0
+          retries: 60
+          delay: 10
+          changed_when: false
+
+        - name: Update kubeconfig to use NLB endpoint
+          shell: |
+            # Update server URL in admin.conf to use NLB
+            sed -i "s|server: https://{{ ansible_default_ipv4.address }}:{{ api_server_port }}|server: https://{{ control_plane_endpoint }}|g" /etc/kubernetes/admin.conf
+            
+            # Update in root kubeconfig
+            sed -i "s|server: https://{{ ansible_default_ipv4.address }}:{{ api_server_port }}|server: https://{{ control_plane_endpoint }}|g" /root/.kube/config
+            
+            # Update in ubuntu kubeconfig
+            sed -i "s|server: https://{{ ansible_default_ipv4.address }}:{{ api_server_port }}|server: https://{{ control_plane_endpoint }}|g" /home/ubuntu/.kube/config
+          changed_when: true
+
+        - name: Update kubeadm ClusterConfiguration to use NLB
+          shell: |
+            kubectl --kubeconfig=/etc/kubernetes/admin.conf \
+              -n kube-system get configmap kubeadm-config -o yaml | \
+              sed "s|controlPlaneEndpoint: {{ ansible_default_ipv4.address }}:{{ api_server_port }}|controlPlaneEndpoint: {{ control_plane_endpoint }}|g" | \
+              kubectl --kubeconfig=/etc/kubernetes/admin.conf apply -f -
+          changed_when: true
+          ignore_errors: yes
+
+        - name: Wait for nodes
           command: kubectl get nodes
           register: kubectl_get_nodes
           until: kubectl_get_nodes.rc == 0
           retries: 30
           delay: 10
+          changed_when: false
 
         - name: Display cluster nodes
           debug:
@@ -119,6 +183,25 @@
             msg: "{{ cluster_info.stdout_lines }}"
 
       when: not k8s_initialized.stat.exists
+      rescue:
+        - name: Show failure details
+          debug:
+            msg: 
+              - "Kubeadm init failed!"
+              - "Check logs with: journalctl -xeu kubelet"
+              - "Check containers: crictl ps -a"
+
+        - name: Get kubelet logs
+          command: journalctl -xeu kubelet --no-pager -n 100
+          register: kubelet_logs
+          changed_when: false
+
+        - name: Display kubelet logs
+          debug:
+            msg: "{{ kubelet_logs.stdout_lines }}"
+
+        - fail:
+            msg: "Kubernetes initialization failed. Check the logs above."
 
     - name: Fetch admin.conf to local machine
       fetch:
@@ -146,6 +229,8 @@
           Master: {{ ansible_hostname }}
           Control Plane Endpoint: {{ control_plane_endpoint }}
 
+          ℹ️  Cluster initialized on local IP, then switched to NLB
+          
           Next Steps:
           1. Join other masters: ansible-playbook 03-join-masters.yml
           2. Join workers: ansible-playbook 04-join-workers.yml
