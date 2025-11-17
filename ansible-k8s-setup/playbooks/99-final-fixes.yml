@@ -1,18 +1,39 @@
 ---
-- name: Final Cluster Setup Fixes
+- name: Final Cluster Verification and Setup
   hosts: first_master
   become: true
   gather_facts: false
 
   tasks:
-    - name: Check Ingress pods
+    - name: Verify all nodes are Ready
       ansible.builtin.shell: |
-        kubectl get pods -n ingress-nginx --no-headers 2>/dev/null | wc -l
-      register: ingress_pods_count
+        kubectl get nodes --no-headers
+      register: all_nodes_check
+      changed_when: false
+
+    - name: Display current nodes status
+      ansible.builtin.debug:
+        msg: "{{ all_nodes_check.stdout_lines }}"
+
+    - name: Check for NotReady nodes
+      ansible.builtin.shell: |
+        kubectl get nodes --no-headers | grep -v " Ready " || true
+      register: not_ready_nodes
+      changed_when: false
+
+    - name: Fail if nodes are NotReady
+      ansible.builtin.fail:
+        msg: "Some nodes are NotReady. Please check Calico CNI installation."
+      when: not_ready_nodes.stdout != ""
+
+    - name: Check Ingress namespace exists
+      ansible.builtin.shell: |
+        kubectl get namespace ingress-nginx --no-headers 2>/dev/null | wc -l
+      register: ingress_ns_exists
       changed_when: false
       failed_when: false
 
-    - name: Install Ingress if not exists
+    - name: Install Ingress NGINX
       block:
         - name: Apply Ingress manifest
           ansible.builtin.shell: |
@@ -21,27 +42,42 @@
 
         - name: Display installation output
           ansible.builtin.debug:
-            msg: "{{ ingress_install.stdout_lines }}"
+            msg: "Ingress NGINX installation started..."
 
         - name: Wait for Ingress namespace
           ansible.builtin.shell: |
-            kubectl get namespace ingress-nginx
-          register: ns_check
-          until: ns_check.rc == 0
-          retries: 10
+            kubectl get namespace ingress-nginx --no-headers
+          register: ns_wait
+          until: ns_wait.rc == 0
+          retries: 20
           delay: 5
+          changed_when: false
 
-        - name: Wait for Ingress pods to start
-          ansible.builtin.pause:
-            seconds: 30
-            prompt: "Waiting for Ingress pods to initialize..."
+      when: ingress_ns_exists.stdout | int == 0
 
-      when: ingress_pods_count.stdout | int == 0
+    - name: Wait for Ingress Controller deployment (this takes 2-3 minutes)
+      ansible.builtin.shell: |
+        kubectl get deployment ingress-nginx-controller -n ingress-nginx --no-headers 2>/dev/null
+      register: ingress_deploy
+      until: ingress_deploy.rc == 0
+      retries: 30
+      delay: 10
+      changed_when: false
+
+    - name: Wait for Ingress pods to be Running
+      ansible.builtin.shell: |
+        kubectl get pods -n ingress-nginx -l app.kubernetes.io/component=controller --no-headers | grep Running | wc -l
+      register: ingress_running
+      until: ingress_running.stdout | int > 0
+      retries: 60
+      delay: 10
+      changed_when: false
 
     - name: Get Ingress pods status
       ansible.builtin.shell: |
-        kubectl get pods -n ingress-nginx
+        kubectl get pods -n ingress-nginx -o wide
       register: ingress_pods
+      changed_when: false
 
     - name: Display Ingress pods
       ansible.builtin.debug:
@@ -51,62 +87,125 @@
       ansible.builtin.shell: |
         kubectl get svc -n ingress-nginx
       register: ingress_svc
+      changed_when: false
 
     - name: Display Ingress service
       ansible.builtin.debug:
         msg: "{{ ingress_svc.stdout_lines }}"
 
-    - name: Copy kubeconfig to ubuntu home
-      ansible.builtin.copy:
-        src: /etc/kubernetes/admin.conf
-        dest: /home/ubuntu/.kube/config
-        owner: ubuntu
-        group: ubuntu
-        mode: '0600'
-        remote_src: true
-
-    - name: Verify kubeconfig works
+    - name: Wait for LoadBalancer to get external hostname (AWS NLB takes 2-3 minutes)
       ansible.builtin.shell: |
-        kubectl get nodes
-      become: false
-      become_user: ubuntu
-      register: kubectl_test
+        kubectl get svc ingress-nginx-controller -n ingress-nginx -o jsonpath='{.status.loadBalancer.ingress[0].hostname}'
+      register: lb_hostname
+      until: lb_hostname.stdout != ""
+      retries: 40
+      delay: 15
+      changed_when: false
+      failed_when: false
 
-    - name: Final status check
+    - name: Display LoadBalancer endpoint
+      ansible.builtin.debug:
+        msg: "LoadBalancer: {{ lb_hostname.stdout if lb_hostname.stdout != '' else 'Still provisioning...' }}"
+
+    - name: Setup kubectl for ubuntu user
+      block:
+        - name: Create .kube directory
+          ansible.builtin.file:
+            path: /home/ubuntu/.kube
+            state: directory
+            owner: ubuntu
+            group: ubuntu
+            mode: '0755'
+
+        - name: Copy kubeconfig
+          ansible.builtin.copy:
+            src: /etc/kubernetes/admin.conf
+            dest: /home/ubuntu/.kube/config
+            owner: ubuntu
+            group: ubuntu
+            mode: '0600'
+            remote_src: true
+
+        - name: Verify kubectl works
+          ansible.builtin.shell: |
+            kubectl get nodes
+          become: false
+          become_user: ubuntu
+          register: kubectl_test
+          changed_when: false
+
+        - name: Display kubectl test
+          ansible.builtin.debug:
+            msg: "{{ kubectl_test.stdout_lines }}"
+
+    - name: Final comprehensive status check
       ansible.builtin.shell: |
-        echo "=== NODES ==="
-        kubectl get nodes
+        echo "=========================================="
+        echo "NODES STATUS:"
+        echo "=========================================="
+        kubectl get nodes -o wide
         echo ""
-        echo "=== NAMESPACES ==="
-        kubectl get ns
+        echo "=========================================="
+        echo "SYSTEM PODS:"
+        echo "=========================================="
+        kubectl get pods -n kube-system
         echo ""
-        echo "=== ALL PODS ==="
-        kubectl get pods -A
+        echo "=========================================="
+        echo "INGRESS PODS:"
+        echo "=========================================="
+        kubectl get pods -n ingress-nginx
         echo ""
-        echo "=== INGRESS SERVICE ==="
+        echo "=========================================="
+        echo "NAMESPACES:"
+        echo "=========================================="
+        kubectl get namespaces
+        echo ""
+        echo "=========================================="
+        echo "INGRESS SERVICE:"
+        echo "=========================================="
         kubectl get svc -n ingress-nginx
-      register: final_check
+        echo ""
+      register: final_status
+      changed_when: false
 
     - name: Display final status
       ansible.builtin.debug:
-        msg: "{{ final_check.stdout_lines }}"
+        msg: "{{ final_status.stdout_lines }}"
 
-    - name: Success summary
+    - name: Count Ready nodes
+      ansible.builtin.shell: |
+        kubectl get nodes --no-headers | grep " Ready " | wc -l
+      register: ready_count
+      changed_when: false
+
+    - name: Final success message
       ansible.builtin.debug:
         msg:
           - "=========================================="
           - "  Cluster Setup Complete!"
           - "=========================================="
           - ""
-          - "Connection Info:"
-          - "  Bastion: 34.225.22.82"
-          - "  API: petclinic-test-master-nlb-cc63ea8341eee8f2.elb.us-east-1.amazonaws.com:6443"
+          - "Cluster Status:"
+          - "  Nodes Ready: {{ ready_count.stdout }}/6"
+          - "  Calico CNI: Running"
+          - "  Ingress NGINX: Running"
+          - "  Namespaces: dev, test, prod"
           - ""
-          - "SSH to cluster:"
-          - "  ssh -i petclinic-test-key.pem ubuntu@34.225.22.82"
-          - "  ssh ubuntu@10.0.10.32  # to master-1"
+          - "LoadBalancer: {{ lb_hostname.stdout if lb_hostname.stdout != '' else 'Provisioning (check in 5 minutes)' }}"
           - ""
-          - "Test commands on master-1:"
-          - "  kubectl get nodes"
-          - "  kubectl get pods -A"
-          - "  kubectl get svc -n ingress-nginx"
+          - "Your Kubernetes cluster is ready for workloads!"
+      when: ready_count.stdout | int == 6
+
+    - name: Warning if not all nodes ready
+      ansible.builtin.debug:
+        msg:
+          - "=========================================="
+          - "  WARNING: Some nodes not Ready!"
+          - "=========================================="
+          - ""
+          - "Only {{ ready_count.stdout }}/6 nodes are Ready"
+          - "Please check:"
+          - "  1. kubectl get nodes"
+          - "  2. kubectl get pods -n kube-system"
+          - "  3. Check node logs with: journalctl -u kubelet"
+      when: ready_count.stdout | int < 6
