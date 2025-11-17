@@ -54,7 +54,7 @@ resource "aws_security_group" "master" {
     security_groups = [aws_security_group.bastion.id]
   }
 
-  # ✅ أهم حاجة: K8s API من كل الـ VPC عشان kubelet / controllers / pods
+  # K8s API from VPC (kubelet, controllers, pods, workers, masters)
   ingress {
     description = "K8s API from VPC"
     from_port   = 6443
@@ -63,13 +63,40 @@ resource "aws_security_group" "master" {
     cidr_blocks = [var.vpc_cidr]
   }
 
-  # K8s API from load balancer (لو استخدمت NLB داخلي)
+  # K8s API from load balancer (internal NLB)
   ingress {
     description     = "K8s API from LB"
     from_port       = 6443
     to_port         = 6443
     protocol        = "tcp"
     security_groups = [aws_security_group.lb.id]
+  }
+
+  # etcd traffic (master <-> master)
+  ingress {
+    description = "etcd peer & client traffic"
+    from_port   = 2379
+    to_port     = 2380
+    protocol    = "tcp"
+    cidr_blocks = [var.vpc_cidr]
+  }
+
+  # kubelet API calls from control plane / nodes
+  ingress {
+    description = "kubelet API (10250) from VPC"
+    from_port   = 10250
+    to_port     = 10250
+    protocol    = "tcp"
+    cidr_blocks = [var.vpc_cidr]
+  }
+
+  # Calico BGP (لو مفعّل)
+  ingress {
+    description = "Calico BGP"
+    from_port   = 179
+    to_port     = 179
+    protocol    = "tcp"
+    cidr_blocks = [var.vpc_cidr]
   }
 
   # All traffic between masters
@@ -116,6 +143,24 @@ resource "aws_security_group" "worker" {
     description = "NodePort Services"
     from_port   = 30000
     to_port     = 32767
+    protocol    = "tcp"
+    cidr_blocks = [var.vpc_cidr]
+  }
+
+  # kubelet API
+  ingress {
+    description = "kubelet API (10250) from VPC"
+    from_port   = 10250
+    to_port     = 10250
+    protocol    = "tcp"
+    cidr_blocks = [var.vpc_cidr]
+  }
+
+  # Calico BGP (لو مفعّل)
+  ingress {
+    description = "Calico BGP"
+    from_port   = 179
+    to_port     = 179
     protocol    = "tcp"
     cidr_blocks = [var.vpc_cidr]
   }
@@ -212,4 +257,66 @@ resource "aws_security_group_rule" "master_from_worker" {
   protocol                 = "-1"
   security_group_id        = aws_security_group.master.id
   source_security_group_id = aws_security_group.worker.id
+}
+
+##############################
+# Network Load Balancer for API Server
+##############################
+
+resource "aws_lb" "master" {
+  name               = "${var.project_name}-${var.environment}-master-nlb"
+  internal           = true
+  load_balancer_type = "network"
+  subnets            = var.subnet_ids
+
+  enable_deletion_protection       = false
+  enable_cross_zone_load_balancing = true
+
+  tags = {
+    Name = "${var.project_name}-${var.environment}-master-nlb"
+    Role = "KubernetesAPI"
+  }
+}
+
+resource "aws_lb_target_group" "master" {
+  name     = "${var.project_name}-${var.environment}-master-tg"
+  port     = 6443
+  protocol = "TCP"
+  vpc_id   = var.vpc_id
+
+  health_check {
+    enabled             = true
+    healthy_threshold   = 2
+    unhealthy_threshold = 2
+    interval            = 10
+    protocol            = "TCP"
+    port                = "6443"
+    timeout             = 10
+  }
+
+  stickiness {
+    enabled = false
+    type    = "source_ip"
+  }
+
+  deregistration_delay = 30
+
+  tags = {
+    Name = "${var.project_name}-${var.environment}-master-tg"
+  }
+}
+
+resource "aws_lb_listener" "master" {
+  load_balancer_arn = aws_lb.master.arn
+  port              = "6443"
+  protocol          = "TCP"
+
+  default_action {
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.master.arn
+  }
+
+  tags = {
+    Name = "${var.project_name}-${var.environment}-master-listener"
+  }
 }
