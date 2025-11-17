@@ -1,6 +1,6 @@
 ---
 # ============================================
-# Kubeadm Configuration for NON-HA (master-1 only)
+# Kubeadm Configuration for HA Cluster (3 Masters)
 # ============================================
 
 apiVersion: kubeadm.k8s.io/v1beta3
@@ -13,9 +13,11 @@ bootstrapTokens:
   usages:
   - signing
   - authentication
+
 localAPIEndpoint:
   advertiseAddress: {{ ansible_default_ipv4.address }}
   bindPort: {{ api_server_port }}
+
 nodeRegistration:
   criSocket: unix:///var/run/containerd/containerd.sock
   imagePullPolicy: IfNotPresent
@@ -28,11 +30,10 @@ nodeRegistration:
 apiVersion: kubeadm.k8s.io/v1beta3
 kind: ClusterConfiguration
 kubernetesVersion: v{{ k8s_version }}.0
-clusterName: {{ cluster_name }}-{{ environment }}
+clusterName: {{ cluster_name }}-{{ env_name }}
 
-# !!! IMPORTANT !!!
-# Use master-1 IP directly (No NLB)
-controlPlaneEndpoint: "{{ ansible_default_ipv4.address }}:6443"
+# HA Endpoint — NLB from Terraform
+controlPlaneEndpoint: "{{ control_plane_endpoint }}"
 
 certificatesDir: {{ k8s_pki_dir }}
 imageRepository: registry.k8s.io
@@ -45,6 +46,7 @@ networking:
 apiServer:
   timeoutForControlPlane: 4m0s
   certSANs:
+  - "{{ control_plane_endpoint.split(':')[0] }}"
   - "{{ ansible_default_ipv4.address }}"
   - "{{ ansible_hostname }}"
   - "localhost"
