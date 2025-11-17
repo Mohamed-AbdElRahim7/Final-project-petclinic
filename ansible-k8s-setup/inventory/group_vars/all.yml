@@ -7,11 +7,14 @@
 cluster_name: petclinic
 env_name: test  # Changed from 'environment' to avoid reserved name
 
+# Backward compatibility for templates that still use "environment"
+environment: "{{ env_name }}"
+
 # Kubernetes Version
 k8s_version: "1.28"
 
 # Control Plane Endpoint (Load Balancer DNS)
-# Will be updated by Ansible from Terraform output
+# Will be updated by Ansible from Terraform output (GitHub Action sed)
 control_plane_endpoint: "master-nlb.example.com:6443"
 
 # Network Configuration
@@ -59,7 +62,7 @@ k8s_namespaces:
       pods: "50"
       services: "20"
       persistentvolumeclaims: "10"
-  
+
   - name: test
     labels:
       environment: testing
@@ -72,7 +75,7 @@ k8s_namespaces:
       pods: "40"
       services: "15"
       persistentvolumeclaims: "8"
-  
+
   - name: prod
     labels:
       environment: production
